@@ -90,17 +90,18 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, watcher) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
-        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
-        watcher.on('change', () => {
+    // If no watcher is provided, create one for the specific file.
+    if (!watcher && !watchers[fileName]) {
+        const newWatcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
+        newWatcher.on('change', () => {
             fileServer.cache.del(fileName);
         });
-        watchers[fileName] = watcher;
+        watchers[fileName] = newWatcher;
         // Add to local instance for programmtic closing
-        this.watchers[fileName] = watcher;
+        this.watchers[fileName] = newWatcher;
     }
 
     if (!fileName || typeof fileName !== 'string') {
@@ -155,10 +156,25 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         }
     }
 
+    // Create a single watcher for the directory if it doesn't exist.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+        watcher.on('change', (path) => {
+            fileServer.cache.del(path);
+        });
+        watcher.on('unlink', (path) => {
+            fileServer.cache.del(path);
+        });
+
+        watchers[rootDirectory] = watcher;
+        this.watchers[rootDirectory] = watcher;
+    }
+
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +188,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, watchers[rootDirectory])(request, response);
     };
 };
 
@@ -182,8 +198,9 @@ FileServer.prototype.close = function(onClose) {
         const watcher = this.watchers[key];
         closePromises.push(watcher.close());
         delete this.watchers[key];
+        delete watchers[key];
     });
-    
+
     Promise.all(closePromises).then(() => {
         onClose();
     });
