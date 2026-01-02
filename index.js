@@ -154,11 +154,25 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             throw new Error(`Extension found without a leading periond ("."): ${keys[i]}`);
         }
     }
+    // Bolt: ⚡ Instead of creating a new file watcher for every file served,
+    // this creates a single watcher for the entire directory, reducing overhead.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        watcher.on('change', (path) => {
+            fileServer.cache.del(path);
+        });
+        watcher.on('unlink', (path) => {
+            fileServer.cache.del(path);
+        });
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[rootDirectory] = watcher;
+    }
 
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +186,31 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        const acceptsGzip =
+            request.headers &&
+            request.headers['accept-encoding'] &&
+            ~request.headers['accept-encoding'].indexOf('gzip');
+
+        kgo({
+            acceptsGzip,
+            fileName: filePath,
+            mimeType: mimeTypes[extention],
+            maxAge,
+            request,
+            response,
+        })
+        ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
+        (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
+        (['*'], error => {
+            if (error.message && ~error.message.indexOf('ENOENT')) {
+                return fileServer.errorCallback(request, response, {
+                    code: 404,
+                    message: `404: Not Found ${filePath}`,
+                });
+            }
+
+            return fileServer.errorCallback(request, response, error);
+        });
     };
 };
 
