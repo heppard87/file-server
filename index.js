@@ -90,6 +90,35 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
+FileServer.prototype._serveFileInternal = function(fileName, mimeType, maxAge, request, response) {
+    const fileServer = this;
+    const acceptsGzip =
+        request.headers &&
+        request.headers['accept-encoding'] &&
+        ~request.headers['accept-encoding'].indexOf('gzip');
+
+    kgo({
+        acceptsGzip,
+        fileName,
+        mimeType,
+        maxAge,
+        request,
+        response,
+    })
+    ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
+    (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
+    (['*'], error => {
+        if (error.message && ~error.message.indexOf('ENOENT')) {
+            return fileServer.errorCallback(request, response, {
+                code: 404,
+                message: `404: Not Found ${fileName}`,
+            });
+        }
+
+        return fileServer.errorCallback(request, response, error);
+    });
+};
+
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
 
@@ -108,36 +137,24 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
     }
 
     return function(request, response) {
-        const acceptsGzip =
-            request.headers &&
-            request.headers['accept-encoding'] &&
-            ~request.headers['accept-encoding'].indexOf('gzip');
-
-        kgo({
-            acceptsGzip,
-            fileName,
-            mimeType,
-            maxAge,
-            request,
-            response,
-        })
-        ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
-        (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
-        (['*'], error => {
-            if (error.message && ~error.message.indexOf('ENOENT')) {
-                return fileServer.errorCallback(request, response, {
-                    code: 404,
-                    message: `404: Not Found ${fileName}`,
-                });
-            }
-
-            return fileServer.errorCallback(request, response, error);
-        });
+        fileServer._serveFileInternal(fileName, mimeType, maxAge, request, response);
     };
 };
 
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
     const fileServer = this;
+
+    // Bolt ⚡: Create one watcher per directory to reduce overhead.
+    // Previously, a new watcher was created for every file.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        watcher.on('change', (fileName) => {
+            fileServer.cache.del(fileName);
+        });
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[rootDirectory] = watcher;
+    }
 
     if (!rootDirectory || typeof rootDirectory !== 'string') {
         throw new Error('Must provide a rootDirectory to serveDirectory');
@@ -172,7 +189,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer._serveFileInternal(filePath, mimeTypes[extention], maxAge, request, response);
     };
 };
 
