@@ -590,66 +590,106 @@ test('serveDirectory 404s if try to navigate up a level', t => {
     serveDirectory(testRequest, testResponse, testFile);
 });
 
-test('serveDirectory calls serveFile', t => {
-    t.plan(5);
+test('serveDirectory serves a file', t => {
+    t.plan(10);
 
-    const testFile = './bar/foo.txt';
+    const testFile = 'bar/foo.txt';
+    const expectedFilePath = path.join(testRootDirectory, testFile);
+    const testMime = 'text/majigger';
 
     const mocks = getBaseMocks();
+    const testResponse = {
+        setHeader: (key, value) => {
+            if (key === 'ETag') {
+                t.equal(value, expectedFilePath + testDate.getTime(), `got correct header value for ${key}`);
+                return;
+            }
+
+            if (key === 'Cache-Control') {
+                t.equal(value, `private, max-age=${testMaxAge}`, `got correct header value for ${key}`);
+                return;
+            }
+
+            if (key === 'Content-Type') {
+                t.equal(value, testMime, `got correct header value for ${key}`);
+                return;
+            }
+
+            t.fail(`Set unexpected header key: ${key} value: ${value}`);
+        },
+        on: (eventName, callback) => {
+            t.equal(eventName, 'error', 'set error handeler');
+            callback(testError);
+        },
+    };
+
+    mocks['stream-catcher'] = function() {
+        this.write = function(fileName, response, createReadStream) {
+            t.equal(fileName, expectedFilePath, 'fileName is correct');
+            t.equal(response, testResponse, 'response is correct');
+            t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
+        };
+    };
+
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
 
-    const fileServer = new MockFileServer(() => {});
+    const fileServer = new MockFileServer(createErrorCallback(t, undefined, testResponse));
 
     const serveDirectory = fileServer.serveDirectory(
         testRootDirectory,
         {
-            '.txt': 'text/majigger',
+            '.txt': testMime,
         },
         testMaxAge,
     );
-
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
-        t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
-        t.equal(mimeType, 'text/majigger', 'mimeType is correct');
-        t.equal(maxAge, testMaxAge, 'maxAge is correct');
-
-        return function(request, response) {
-            t.equal(request, testRequest, 'request is correct');
-            t.equal(response, testResponse, 'response is correct');
-        };
-    };
 
     serveDirectory(testRequest, testResponse, testFile);
 });
 
-test('serveDirectory calls serveFile with filename retrieved from url', t => {
-    t.plan(5);
+test('serveDirectory serves a file with filename from url', t => {
+    t.plan(10);
 
-    const testFile = './bar/foo.txt';
-
+    const testFile = 'bar/foo.txt';
+    const expectedFilePath = path.join(testRootDirectory, testFile);
+    const testMime = 'text/majigger';
     const mocks = getBaseMocks();
-    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
-
-    const fileServer = new MockFileServer(() => {});
-
-    const serveDirectory = fileServer.serveDirectory(
-        testRootDirectory,
-        {
-            '.txt': 'text/majigger',
+    const testResponse = {
+        setHeader: (key, value) => {
+            if (key === 'ETag') {
+                t.equal(value, expectedFilePath + testDate.getTime(), `got correct header value for ${key}`);
+                return;
+            }
+            if (key === 'Cache-Control') {
+                t.equal(value, `private, max-age=${testMaxAge}`, `got correct header value for ${key}`);
+                return;
+            }
+            if (key === 'Content-Type') {
+                t.equal(value, testMime, `got correct header value for ${key}`);
+                return;
+            }
+            t.fail(`Set unexpected header key: ${key} value: ${value}`);
         },
-        testMaxAge,
-    );
+        on: (eventName, callback) => {
+            t.equal(eventName, 'error', 'set error handeler');
+            callback(testError);
+        },
+    };
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
-        t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
-        t.equal(mimeType, 'text/majigger', 'mimeType is correct');
-        t.equal(maxAge, testMaxAge, 'maxAge is correct');
-
-        return function(request, response) {
-            t.equal(request, testRequest, 'request is correct');
+    mocks['stream-catcher'] = function() {
+        this.write = function(fileName, response, createReadStream) {
+            t.equal(fileName, expectedFilePath, 'fileName is correct');
             t.equal(response, testResponse, 'response is correct');
+            t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
         };
     };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(createErrorCallback(t, undefined, testResponse));
+    const serveDirectory = fileServer.serveDirectory(
+        testRootDirectory,
+        { '.txt': testMime },
+        testMaxAge,
+    );
 
     serveDirectory(testRequest, testResponse);
 });
@@ -665,7 +705,7 @@ test('close terminates all file watchers', t => {
             on: () => {},
             close: () => {
                 closedConnections++;
-                Promise.resolve();
+                return Promise.resolve();
             },
         };
     };
@@ -673,7 +713,7 @@ test('close terminates all file watchers', t => {
 
     const fileServer = new MockFileServer(() => {});
 
-    // Observe 2 files via each method
+    // Observe a directory and a file
     const serveDirectory = fileServer.serveDirectory(
         testRootDirectory,
         {
@@ -684,15 +724,15 @@ test('close terminates all file watchers', t => {
 
     const serveFile = fileServer.serveFile(testFileName);
 
-    // Watchers start on first request
+    // Watchers are created on first call
     serveDirectory(testRequest, testResponse);
     serveFile(testRequest, testResponse);
 
-    t.equal(Object.keys(fileServer.watchers).length, 2);
+    t.equal(Object.keys(fileServer.watchers).length, 2, 'two watchers are created');
 
     fileServer.close(() => {
-        t.equal(closedConnections, 2);
-        t.equal(Object.keys(fileServer.watchers).length, 0);
+        t.equal(closedConnections, 2, 'two watchers were closed');
+        t.equal(Object.keys(fileServer.watchers).length, 0, 'watchers object is empty');
     });
 
 });
