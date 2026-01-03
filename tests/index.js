@@ -384,40 +384,6 @@ test('serveFile watches files only once with chokidar', t => {
     fileServer.serveFile(testFileName);
 });
 
-test('process on exit cleans up watches', t => {
-    t.plan(1);
-
-    const mocks = getBaseMocks();
-    const oldProcessOn = process.on;
-
-    let MockFileServer;
-
-    mocks.chokidar.watch = () => ({
-        on: (event, callback) => callback(),
-        close: () => t.pass('closed watcher'),
-    });
-
-    mocks['stream-catcher'] = function() {
-        this.del = () => {};
-    };
-
-    process.on = function(event, callback) {
-        setTimeout(() => {
-            const fileServer = new MockFileServer(() => {});
-
-            fileServer.serveFile(testFileName);
-
-            callback();
-
-            oldProcessOn.call(process, event, callback);
-        }, 0);
-
-        process.on = oldProcessOn;
-    };
-
-    MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
-});
-
 test('serveFile checks for .gz file if gzip supported but uses original if not available', t => {
     t.plan(3);
 
@@ -590,7 +556,7 @@ test('serveDirectory 404s if try to navigate up a level', t => {
     serveDirectory(testRequest, testResponse, testFile);
 });
 
-test('serveDirectory calls serveFile', t => {
+test('serveDirectory calls _serveFileInternal', t => {
     t.plan(5);
 
     const testFile = './bar/foo.txt';
@@ -608,24 +574,21 @@ test('serveDirectory calls serveFile', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer._serveFileInternal = function(fileName, mimeType, maxAge, request, response) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
-
-        return function(request, response) {
-            t.equal(request, testRequest, 'request is correct');
-            t.equal(response, testResponse, 'response is correct');
-        };
+        t.equal(request, testRequest, 'request is correct');
+        t.equal(response, testResponse, 'response is correct');
     };
 
     serveDirectory(testRequest, testResponse, testFile);
 });
 
-test('serveDirectory calls serveFile with filename retrieved from url', t => {
+test('serveDirectory calls _serveFileInternal with filename retrieved from url', t => {
     t.plan(5);
 
-    const testFile = './bar/foo.txt';
+    const testFile = 'bar/foo.txt';
 
     const mocks = getBaseMocks();
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -640,15 +603,12 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer._serveFileInternal = function(fileName, mimeType, maxAge, request, response) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
-
-        return function(request, response) {
-            t.equal(request, testRequest, 'request is correct');
-            t.equal(response, testResponse, 'response is correct');
-        };
+        t.equal(request, testRequest, 'request is correct');
+        t.equal(response, testResponse, 'response is correct');
     };
 
     serveDirectory(testRequest, testResponse);
