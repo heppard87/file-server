@@ -90,10 +90,45 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
+FileServer.prototype._serveFileInternal = function(fileName, mimeType, maxAge, request, response) {
+    const fileServer = this;
+    const acceptsGzip =
+        request.headers &&
+        request.headers['accept-encoding'] &&
+        ~request.headers['accept-encoding'].indexOf('gzip');
+
+    kgo({
+        acceptsGzip,
+        fileName,
+        mimeType,
+        maxAge,
+        request,
+        response,
+    })
+    ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
+    (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
+    (['*'], error => {
+        if (error.message && ~error.message.indexOf('ENOENT')) {
+            return fileServer.errorCallback(request, response, {
+                code: 404,
+                message: `404: Not Found ${fileName}`,
+            });
+        }
+
+        return fileServer.errorCallback(request, response, error);
+    });
+};
+
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // Optimization: Check if the file is already covered by a directory watcher.
+    const isAlreadyWatched = Object.keys(watchers).some(watchedPath => {
+        const relative = path.relative(watchedPath, fileName);
+        return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+    });
+
+    if (!isAlreadyWatched && !watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
@@ -108,31 +143,7 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
     }
 
     return function(request, response) {
-        const acceptsGzip =
-            request.headers &&
-            request.headers['accept-encoding'] &&
-            ~request.headers['accept-encoding'].indexOf('gzip');
-
-        kgo({
-            acceptsGzip,
-            fileName,
-            mimeType,
-            maxAge,
-            request,
-            response,
-        })
-        ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
-        (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
-        (['*'], error => {
-            if (error.message && ~error.message.indexOf('ENOENT')) {
-                return fileServer.errorCallback(request, response, {
-                    code: 404,
-                    message: `404: Not Found ${fileName}`,
-                });
-            }
-
-            return fileServer.errorCallback(request, response, error);
-        });
+        fileServer._serveFileInternal(fileName, mimeType, maxAge, request, response);
     };
 };
 
@@ -155,10 +166,24 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         }
     }
 
+    // Create a single watcher for the directory
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        // Invalidate cache on change or unlink
+        watcher.on('change', filePath => {
+            fileServer.cache.del(filePath);
+        });
+        watcher.on('unlink', filePath => {
+            fileServer.cache.del(filePath);
+        });
+        watchers[rootDirectory] = watcher;
+        this.watchers[rootDirectory] = watcher;
+    }
+
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +197,8 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        // Use the internal serve file function to avoid creating a new watcher for every file.
+        fileServer._serveFileInternal(filePath, mimeTypes[extention], maxAge, request, response);
     };
 };
 
