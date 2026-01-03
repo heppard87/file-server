@@ -5,7 +5,6 @@ const kgo = require('kgo');
 const StreamCatcher = require('stream-catcher');
 const chokidar = require('chokidar');
 
-const watchers = {};
 const cacheMaxSize = 1024 * 1000;
 
 function cacheLengthFunction(n) {
@@ -90,16 +89,43 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
+FileServer.prototype._serveFileInternal = function(fileName, mimeType, maxAge, request, response) {
+    const fileServer = this;
+    const acceptsGzip =
+        request.headers &&
+        request.headers['accept-encoding'] &&
+        ~request.headers['accept-encoding'].indexOf('gzip');
+
+    kgo({
+        acceptsGzip,
+        fileName,
+        mimeType,
+        maxAge,
+        request,
+        response,
+    })
+    ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
+    (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
+    (['*'], (error) => {
+        if (error.message && ~error.message.indexOf('ENOENT')) {
+            return fileServer.errorCallback(request, response, {
+                code: 404,
+                message: `404: Not Found ${fileName}`,
+            });
+        }
+
+        return fileServer.errorCallback(request, response, error);
+    });
+}
+
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    if (!this.watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
         });
-        watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
         this.watchers[fileName] = watcher;
     }
 
@@ -108,31 +134,7 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
     }
 
     return function(request, response) {
-        const acceptsGzip =
-            request.headers &&
-            request.headers['accept-encoding'] &&
-            ~request.headers['accept-encoding'].indexOf('gzip');
-
-        kgo({
-            acceptsGzip,
-            fileName,
-            mimeType,
-            maxAge,
-            request,
-            response,
-        })
-        ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
-        (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
-        (['*'], error => {
-            if (error.message && ~error.message.indexOf('ENOENT')) {
-                return fileServer.errorCallback(request, response, {
-                    code: 404,
-                    message: `404: Not Found ${fileName}`,
-                });
-            }
-
-            return fileServer.errorCallback(request, response, error);
-        });
+        fileServer._serveFileInternal(fileName, mimeType, maxAge, request, response);
     };
 };
 
@@ -148,6 +150,18 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
     }
 
     const keys = Object.keys(mimeTypes);
+    const watcherKey = `dir:${rootDirectory}`;
+
+    if (!this.watchers[watcherKey]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        watcher.on('change', (filePath) => {
+            fileServer.cache.del(filePath);
+        });
+        watcher.on('unlink', (filePath) => {
+            fileServer.cache.del(filePath);
+        });
+        this.watchers[watcherKey] = watcher;
+    }
 
     for (let i = 0; i < keys.length; i++) {
         if (keys[i].charAt(0) !== '.') {
@@ -158,7 +172,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +186,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer._serveFileInternal(filePath, mimeTypes[extention], maxAge, request, response);
     };
 };
 
@@ -188,9 +202,5 @@ FileServer.prototype.close = function(onClose) {
         onClose();
     });
 }
-
-process.on('exit', () => {
-    Object.values(watchers).forEach(watcher => watcher.close());
-});
 
 module.exports = FileServer;
