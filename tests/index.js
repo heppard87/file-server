@@ -608,7 +608,7 @@ test('serveDirectory calls serveFile', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer._serveFileInternal = function(fileName, mimeType, maxAge) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
@@ -640,7 +640,7 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer._serveFileInternal = function(fileName, mimeType, maxAge) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
@@ -651,6 +651,47 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         };
     };
 
+    serveDirectory(testRequest, testResponse);
+});
+
+test('serveDirectory watches directory only once with chokidar', t => {
+    t.plan(6);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                t.ok(event === 'change' || event === 'unlink', `got correct event: ${event}`);
+                callback(testRootDirectory);
+            },
+        };
+    };
+
+    const baseStreamCatcher = mocks['stream-catcher'];
+    mocks['stream-catcher'] = function() {
+        const catcher = new baseStreamCatcher();
+        catcher.del = fileName => t.equal(fileName, testRootDirectory, 'deleted correct fileName');
+        return catcher;
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const fileServer = new MockFileServer(() => {});
+
+    const serveDirectory = fileServer.serveDirectory(
+        testRootDirectory,
+        {
+            '.txt': 'text/majigger',
+        },
+        testMaxAge,
+    );
+
+    serveDirectory(testRequest, testResponse);
     serveDirectory(testRequest, testResponse);
 });
 
