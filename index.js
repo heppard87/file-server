@@ -90,18 +90,10 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+// This is the internal function for serving a file
+// It does not create any watchers, and is used by serveFile and serveDirectory
+FileServer.prototype._serveFileInternal = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
-
-    if (!watchers[fileName]) {
-        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
-        watcher.on('change', () => {
-            fileServer.cache.del(fileName);
-        });
-        watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
-        this.watchers[fileName] = watcher;
-    }
 
     if (!fileName || typeof fileName !== 'string') {
         throw new Error('Must provide a fileName to serveFile');
@@ -134,6 +126,22 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
             return fileServer.errorCallback(request, response, error);
         });
     };
+}
+
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+    const fileServer = this;
+
+    if (!watchers[fileName]) {
+        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
+        watcher.on('change', () => {
+            fileServer.cache.del(fileName);
+        });
+        watchers[fileName] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[fileName] = watcher;
+    }
+
+    return fileServer._serveFileInternal(fileName, mimeType, maxAge);
 };
 
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
@@ -147,6 +155,23 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         throw new Error('Must provide a mimeTypes object to serveDirectory');
     }
 
+    // ---
+    // Bolt ⚡ Optimization: Watch the entire directory instead of individual files.
+    // This significantly reduces the number of file watchers, lowering memory usage
+    // and preventing hitting OS limits on file handles.
+    // ---
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        // On any change or deletion, invalidate the specific file's cache.
+        const onchange = (filePath) => fileServer.cache.del(filePath);
+        watcher.on('change', onchange);
+        watcher.on('unlink', onchange);
+
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmatic closing
+        this.watchers[rootDirectory] = watcher;
+    }
+
     const keys = Object.keys(mimeTypes);
 
     for (let i = 0; i < keys.length; i++) {
@@ -158,7 +183,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +197,8 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        // Call the internal method to avoid creating a new watcher for every file.
+        fileServer._serveFileInternal(filePath, mimeTypes[extention], maxAge)(request, response);
     };
 };
 
