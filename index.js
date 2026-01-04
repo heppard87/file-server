@@ -90,18 +90,8 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype._serveFileInternal = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
-
-    if (!watchers[fileName]) {
-        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
-        watcher.on('change', () => {
-            fileServer.cache.del(fileName);
-        });
-        watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
-        this.watchers[fileName] = watcher;
-    }
 
     if (!fileName || typeof fileName !== 'string') {
         throw new Error('Must provide a fileName to serveFile');
@@ -134,6 +124,22 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
             return fileServer.errorCallback(request, response, error);
         });
     };
+}
+
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+    const fileServer = this;
+
+    if (!watchers[fileName]) {
+        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
+        watcher.on('change', () => {
+            fileServer.cache.del(fileName);
+        });
+        watchers[fileName] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[fileName] = watcher;
+    }
+
+    return fileServer._serveFileInternal(fileName, mimeType, maxAge);
 };
 
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
@@ -147,6 +153,22 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         throw new Error('Must provide a mimeTypes object to serveDirectory');
     }
 
+    // Bolt ⚡: Create one watcher per directory to avoid excessive memory usage.
+    // Previously, a new watcher was created for every file served.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+        watcher.on('change', (filePath) => {
+            fileServer.cache.del(filePath);
+        });
+        watcher.on('unlink', (filePath) => {
+            fileServer.cache.del(filePath);
+        });
+
+        watchers[rootDirectory] = watcher;
+        this.watchers[rootDirectory] = watcher;
+    }
+
     const keys = Object.keys(mimeTypes);
 
     for (let i = 0; i < keys.length; i++) {
@@ -158,7 +180,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +194,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer._serveFileInternal(filePath, mimeTypes[extention], maxAge)(request, response);
     };
 };
 
