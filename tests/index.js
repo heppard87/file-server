@@ -590,10 +590,11 @@ test('serveDirectory 404s if try to navigate up a level', t => {
     serveDirectory(testRequest, testResponse, testFile);
 });
 
-test('serveDirectory calls serveFile', t => {
+test('serveDirectory calls _serveFileInternal', t => {
     t.plan(5);
 
-    const testFile = './bar/foo.txt';
+    const testFile = 'foo.txt';
+    const testFilePath = path.join(testRootDirectory, testFile);
 
     const mocks = getBaseMocks();
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -608,15 +609,12 @@ test('serveDirectory calls serveFile', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
-        t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
+    fileServer._serveFileInternal = function(fileName, mimeType, maxAge, request, response) {
+        t.equal(fileName, testFilePath, 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
-
-        return function(request, response) {
-            t.equal(request, testRequest, 'request is correct');
-            t.equal(response, testResponse, 'response is correct');
-        };
+        t.equal(request, testRequest, 'request is correct');
+        t.equal(response, testResponse, 'response is correct');
     };
 
     serveDirectory(testRequest, testResponse, testFile);
@@ -625,7 +623,7 @@ test('serveDirectory calls serveFile', t => {
 test('serveDirectory calls serveFile with filename retrieved from url', t => {
     t.plan(5);
 
-    const testFile = './bar/foo.txt';
+    const testFile = 'bar/foo.txt';
 
     const mocks = getBaseMocks();
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -640,15 +638,12 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer._serveFileInternal = function(fileName, mimeType, maxAge, request, response) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
-
-        return function(request, response) {
-            t.equal(request, testRequest, 'request is correct');
-            t.equal(response, testResponse, 'response is correct');
-        };
+        t.equal(request, testRequest, 'request is correct');
+        t.equal(response, testResponse, 'response is correct');
     };
 
     serveDirectory(testRequest, testResponse);
@@ -665,7 +660,7 @@ test('close terminates all file watchers', t => {
             on: () => {},
             close: () => {
                 closedConnections++;
-                Promise.resolve();
+                return Promise.resolve();
             },
         };
     };
@@ -682,10 +677,10 @@ test('close terminates all file watchers', t => {
         testMaxAge,
     );
 
-    const serveFile = fileServer.serveFile(testFileName);
+    const serveFile = fileServer.serveFile(testFileName, 'text/majigger', testMaxAge);
 
     // Watchers start on first request
-    serveDirectory(testRequest, testResponse);
+    serveDirectory(testRequest, testResponse, 'foo.txt');
     serveFile(testRequest, testResponse);
 
     t.equal(Object.keys(fileServer.watchers).length, 2);
@@ -695,4 +690,86 @@ test('close terminates all file watchers', t => {
         t.equal(Object.keys(fileServer.watchers).length, 0);
     });
 
+});
+
+test('serving a file within a directory does not create a new watcher', t => {
+    t.plan(1);
+
+    const mocks = getBaseMocks();
+    let watcherCount = 0;
+    mocks.chokidar.watch = () => {
+        watcherCount++;
+        return {
+            on: () => {},
+            close: () => Promise.resolve(),
+        };
+    };
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const fileServer = new MockFileServer(() => {});
+
+    const serveDirectory = fileServer.serveDirectory(
+        testRootDirectory,
+        {
+            '.txt': 'text/majigger',
+        },
+        testMaxAge,
+    );
+
+    const fileInDirectory = path.join(testRootDirectory, 'foo.txt');
+    const serveFile = fileServer.serveFile(fileInDirectory, 'text/majigger', testMaxAge);
+
+    // First, serve the directory to create the directory watcher.
+    serveDirectory(testRequest, testResponse, 'foo.txt');
+    // Then, serve a file inside that directory.
+    serveFile(testRequest, testResponse);
+
+    t.equal(watcherCount, 1, 'only one watcher was created');
+});
+
+test('directory watcher invalidates cache on file change', t => {
+    t.plan(2);
+
+    const mocks = getBaseMocks();
+    let changeCallback;
+    mocks.chokidar.watch = () => {
+        return {
+            on: (event, callback) => {
+                if (event === 'change') {
+                    changeCallback = callback;
+                }
+            },
+            close: () => Promise.resolve(),
+        };
+    };
+
+    const fileInDirectory = path.join(testRootDirectory, 'foo.txt');
+    mocks['stream-catcher'] = function() {
+        this.write = () => {};
+        this.del = (fileName) => {
+            t.equal(fileName, fileInDirectory, 'deleted correct fileName from cache');
+        };
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const fileServer = new MockFileServer(() => {});
+
+    const serveDirectory = fileServer.serveDirectory(
+        testRootDirectory,
+        {
+            '.txt': 'text/majigger',
+        },
+        testMaxAge,
+    );
+
+    // Initial request to set up the watcher
+    serveDirectory(testRequest, testResponse, 'foo.txt');
+
+    t.ok(changeCallback, 'change callback was registered');
+
+    // Simulate a file change
+    if (changeCallback) {
+        changeCallback(fileInDirectory);
+    }
 });

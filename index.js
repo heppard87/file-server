@@ -90,10 +90,49 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
+// Internal file server, should not be used on its own.
+FileServer.prototype._serveFileInternal = function(fileName, mimeType, maxAge, request, response) {
+    const fileServer = this;
+    const acceptsGzip =
+        request.headers &&
+        request.headers['accept-encoding'] &&
+        ~request.headers['accept-encoding'].indexOf('gzip');
+
+    kgo({
+        acceptsGzip,
+        fileName,
+        mimeType,
+        maxAge,
+        request,
+        response,
+    })
+    ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
+    (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
+    (['*'], error => {
+        if (error.message && ~error.message.indexOf('ENOENT')) {
+            return fileServer.errorCallback(request, response, {
+                code: 404,
+                message: `404: Not Found ${fileName}`,
+            });
+        }
+
+        return fileServer.errorCallback(request, response, error);
+    });
+}
+
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // Optimization: Check if the file is already covered by an existing directory watcher.
+    const isAlreadyWatched = Object.keys(watchers).some(watcherPath => {
+        const relative = path.relative(watcherPath, fileName);
+        // An empty relative path means an exact match.
+        // A non-empty relative path that doesn't start with '..' means the file is
+        // inside the watched directory.
+        return relative === '' || (relative && !relative.startsWith('..'));
+    });
+
+    if (!isAlreadyWatched) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
@@ -107,33 +146,7 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
         throw new Error('Must provide a fileName to serveFile');
     }
 
-    return function(request, response) {
-        const acceptsGzip =
-            request.headers &&
-            request.headers['accept-encoding'] &&
-            ~request.headers['accept-encoding'].indexOf('gzip');
-
-        kgo({
-            acceptsGzip,
-            fileName,
-            mimeType,
-            maxAge,
-            request,
-            response,
-        })
-        ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
-        (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
-        (['*'], error => {
-            if (error.message && ~error.message.indexOf('ENOENT')) {
-                return fileServer.errorCallback(request, response, {
-                    code: 404,
-                    message: `404: Not Found ${fileName}`,
-                });
-            }
-
-            return fileServer.errorCallback(request, response, error);
-        });
-    };
+    return fileServer._serveFileInternal.bind(fileServer, fileName, mimeType, maxAge);
 };
 
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
@@ -147,6 +160,17 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         throw new Error('Must provide a mimeTypes object to serveDirectory');
     }
 
+    // Create a single watcher for the entire directory
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        watcher.on('change', (filePath) => {
+            fileServer.cache.del(filePath);
+        });
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmatic closing
+        this.watchers[rootDirectory] = watcher;
+    }
+
     const keys = Object.keys(mimeTypes);
 
     for (let i = 0; i < keys.length; i++) {
@@ -158,7 +182,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +196,10 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        // Optimization: A single, efficient directory-level watcher is added for cache
+        // invalidation, and the direct call to `_serveFileInternal` avoids unnecessary
+        // function allocation.
+        fileServer._serveFileInternal(filePath, mimeTypes[extention], maxAge, request, response);
     };
 };
 
