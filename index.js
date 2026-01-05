@@ -90,18 +90,8 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype._serveFileInternal = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
-
-    if (!watchers[fileName]) {
-        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
-        watcher.on('change', () => {
-            fileServer.cache.del(fileName);
-        });
-        watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
-        this.watchers[fileName] = watcher;
-    }
 
     if (!fileName || typeof fileName !== 'string') {
         throw new Error('Must provide a fileName to serveFile');
@@ -136,6 +126,22 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
     };
 };
 
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+    const fileServer = this;
+
+    if (!watchers[fileName]) {
+        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
+        watcher.on('change', () => {
+            fileServer.cache.del(fileName);
+        });
+        watchers[fileName] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[fileName] = watcher;
+    }
+
+    return fileServer._serveFileInternal(fileName, mimeType, maxAge);
+};
+
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
     const fileServer = this;
 
@@ -145,6 +151,17 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
 
     if (!mimeTypes || typeof mimeTypes !== 'object') {
         throw new Error('Must provide a mimeTypes object to serveDirectory');
+    }
+
+    // Create a single watcher for the entire directory to avoid excessive resource usage
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        watcher.on('change', (fileName) => {
+            fileServer.cache.del(fileName);
+        });
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[rootDirectory] = watcher;
     }
 
     const keys = Object.keys(mimeTypes);
@@ -172,7 +189,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer._serveFileInternal(filePath, mimeTypes[extention], maxAge)(request, response);
     };
 };
 
