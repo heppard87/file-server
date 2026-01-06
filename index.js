@@ -90,54 +90,86 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
+FileServer.prototype._serveFileInternal = function(fileName, mimeType, maxAge, request, response) {
+    const fileServer = this;
+    const acceptsGzip =
+        request.headers &&
+        request.headers['accept-encoding'] &&
+        ~request.headers['accept-encoding'].indexOf('gzip');
+
+    kgo({
+        acceptsGzip,
+        fileName,
+        mimeType,
+        maxAge,
+        request,
+        response,
+    })
+    ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
+    (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
+    (['*'], error => {
+        if (error.message && ~error.message.indexOf('ENOENT')) {
+            return fileServer.errorCallback(request, response, {
+                code: 404,
+                message: `404: Not Found ${fileName}`,
+            });
+        }
+
+        return fileServer.errorCallback(request, response, error);
+    });
+};
+
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // ⚡ Bolt: Check if an existing directory watcher already covers this file.
+    // This prevents creating redundant watchers for files within a directory
+    // that is already being watched by `serveDirectory`.
+    const isAlreadyWatched = Object.keys(watchers).some(watchedPath => {
+        const relative = path.relative(watchedPath, fileName);
+        // An empty string means they are the same path.
+        // A path not starting with '..' means fileName is a descendant of watchedPath.
+        return relative === '' || (relative && !relative.startsWith('..'));
+    });
+
+    if (!isAlreadyWatched) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
         });
         watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
+        // Add to local instance for programmatic closing
         this.watchers[fileName] = watcher;
     }
+
 
     if (!fileName || typeof fileName !== 'string') {
         throw new Error('Must provide a fileName to serveFile');
     }
 
     return function(request, response) {
-        const acceptsGzip =
-            request.headers &&
-            request.headers['accept-encoding'] &&
-            ~request.headers['accept-encoding'].indexOf('gzip');
-
-        kgo({
-            acceptsGzip,
-            fileName,
-            mimeType,
-            maxAge,
-            request,
-            response,
-        })
-        ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
-        (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
-        (['*'], error => {
-            if (error.message && ~error.message.indexOf('ENOENT')) {
-                return fileServer.errorCallback(request, response, {
-                    code: 404,
-                    message: `404: Not Found ${fileName}`,
-                });
-            }
-
-            return fileServer.errorCallback(request, response, error);
-        });
+        fileServer._serveFileInternal(fileName, mimeType, maxAge, request, response);
     };
 };
 
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
     const fileServer = this;
+
+    // ⚡ Bolt: Create a single watcher for the entire directory.
+    // This avoids creating a new file watcher for every single file served,
+    // which is a major performance bottleneck.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, {
+            persistent: true,
+            ignoreInitial: true,
+        });
+        watcher.on('change', path => {
+            fileServer.cache.del(path);
+        });
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmatic closing
+        this.watchers[rootDirectory] = watcher;
+    }
 
     if (!rootDirectory || typeof rootDirectory !== 'string') {
         throw new Error('Must provide a rootDirectory to serveDirectory');
@@ -158,7 +190,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +204,9 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        // ⚡ Bolt: Call the internal serve function directly.
+        // This bypasses the watcher creation logic in `serveFile`, which is now handled by the single directory watcher.
+        fileServer._serveFileInternal(filePath, mimeTypes[extention], maxAge, request, response);
     };
 };
 
