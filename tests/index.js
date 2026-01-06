@@ -622,6 +622,64 @@ test('serveDirectory calls serveFile', t => {
     serveDirectory(testRequest, testResponse, testFile);
 });
 
+test('serveDirectory watches the directory only once with chokidar', t => {
+    t.plan(3);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    let watchCallCount = 0;
+
+    mocks.chokidar.watch = (fileName, options) => {
+        watchCallCount++;
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function() {
+                // Do nothing
+            },
+        };
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+    const serve = fileServer.serveDirectory(testRootDirectory, {
+        '.txt': 'text/majigger',
+    });
+
+    serve(testRequest, testResponse, 'foo.txt');
+    serve(testRequest, testResponse, 'bar.txt');
+
+    t.equal(watchCallCount, 1, 'chokidar.watch was only called once');
+});
+
+test('serveFile does not create a watcher for a file within an already-watched directory', t => {
+    t.plan(1);
+
+    const mocks = getBaseMocks();
+    let watchCallCount = 0;
+
+    mocks.chokidar.watch = () => {
+        watchCallCount++;
+        return {
+            on: function() {
+                // Do nothing
+            },
+        };
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+    const serve = fileServer.serveDirectory(testRootDirectory, {
+        '.txt': 'text/majigger',
+    });
+
+    serve(testRequest, testResponse, 'foo.txt');
+    fileServer.serveFile(path.join(testRootDirectory, 'bar.txt'));
+
+    t.equal(watchCallCount, 1, 'chokidar.watch was only called once');
+});
+
 test('serveDirectory calls serveFile with filename retrieved from url', t => {
     t.plan(5);
 
