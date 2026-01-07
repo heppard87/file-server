@@ -93,10 +93,21 @@ function getStats(acceptsGzip, fileName, response, done) {
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // Performance Optimization: Check if a parent directory is already being watched.
+    // This prevents creating a new watcher for every single file when using serveDirectory.
+    const isAlreadyWatched = Object.keys(watchers).some(watchedPath => {
+        const relative = path.relative(watchedPath, fileName);
+        // If relative path doesn't start with '..', it means `fileName` is inside `watchedPath`.
+        // An empty string for `relative` means it's the same path, which is also "watched".
+        return !relative.startsWith('..');
+    });
+
+    if (!isAlreadyWatched) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            // Also invalidate gzipped version if it exists
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -138,6 +149,20 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
 
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
     const fileServer = this;
+
+    // Performance Optimization: Create a single watcher for the entire directory.
+    // This is more efficient than creating a watcher for each file.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        watcher.on('change', (fileName) => {
+            fileServer.cache.del(fileName);
+            // Also invalidate gzipped version if it exists
+            fileServer.cache.del(`${fileName}.gz`);
+        });
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[rootDirectory] = watcher;
+    }
 
     if (!rootDirectory || typeof rootDirectory !== 'string') {
         throw new Error('Must provide a rootDirectory to serveDirectory');
