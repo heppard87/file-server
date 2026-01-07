@@ -355,10 +355,11 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(5);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+    const deletedFiles = [];
 
     mocks.chokidar.watch = (fileName, options) => {
         t.equal(fileName, testFileName, 'got correct fileName');
@@ -368,12 +369,14 @@ test('serveFile watches files only once with chokidar', t => {
             on: function(event, callback) {
                 t.equal(event, 'change', 'got correct event');
                 callback();
+                t.equal(deletedFiles[0], testFileName, 'deleted correct fileName');
+                t.equal(deletedFiles[1], `${testFileName}.gz`, 'deleted correct gzipped fileName');
             },
         };
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => deletedFiles.push(fileName);
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -695,4 +698,62 @@ test('close terminates all file watchers', t => {
         t.equal(Object.keys(fileServer.watchers).length, 0);
     });
 
+});
+
+test('serveDirectory creates a single watcher for the directory and serveFile does not create a new one', t => {
+    t.plan(6);
+
+    const mocks = getBaseMocks();
+    const testFileInDir = path.join(testRootDirectory, 'foo.txt');
+    let watchCallCount = 0;
+    let changeCallback;
+    const deletedFiles = [];
+
+    mocks.chokidar.watch = (fileName, options) => {
+        watchCallCount++;
+        // First call should be for the directory
+        if (watchCallCount === 1) {
+            t.equal(fileName, testRootDirectory, 'chokidar.watch called with directory');
+        } else {
+            // This should not be called
+            t.fail('chokidar.watch should not be called for the individual file');
+        }
+
+        return {
+            on: function(event, callback) {
+                if (event === 'change') {
+                    changeCallback = callback;
+                }
+            },
+            close: () => Promise.resolve(),
+        };
+    };
+
+    mocks['stream-catcher'] = function() {
+        this.write = () => {};
+        this.del = fileName => deletedFiles.push(fileName);
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+
+    const serve = fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+    serve(testRequest, testResponse, 'foo.txt');
+
+    const serveFile = fileServer.serveFile(testFileInDir);
+    serveFile(testRequest, testResponse);
+
+    t.equal(watchCallCount, 1, 'chokidar.watch was only called once');
+
+    // Simulate a file change
+    changeCallback(testFileInDir);
+
+    t.equal(deletedFiles.length, 2, 'cache.del was called twice');
+    t.equal(deletedFiles[0], testFileInDir, 'deleted correct fileName');
+    t.equal(deletedFiles[1], `${testFileInDir}.gz`, 'deleted correct gzipped fileName');
+
+    // Verify that a second call to serveDirectory doesn't create a new watcher
+    const serve2 = fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+    serve2(testRequest, testResponse, 'bar.txt');
+    t.equal(watchCallCount, 1, 'chokidar.watch was not called again for the same directory');
 });
