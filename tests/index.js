@@ -354,26 +354,40 @@ test('serveFile passes create stream into cache', t => {
     serveFile(testRequest, testResponse);
 });
 
-test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+test('serveFile watches directories only once with chokidar', t => {
+    t.plan(6);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+    const directoryName = path.dirname(testFileName);
 
     mocks.chokidar.watch = (fileName, options) => {
-        t.equal(fileName, testFileName, 'got correct fileName');
+        t.equal(fileName, directoryName, 'got correct directoryName');
         t.deepEqual(options, expectedOptions, 'got correct options');
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
-                callback();
+                if (event === 'change') {
+                    t.equal(event, 'change', 'got correct event');
+                    callback(testFileName);
+                } else if (event === 'unlink') {
+                    t.equal(event, 'unlink', 'got correct event');
+                    callback(testFileName);
+                }
             },
         };
     };
 
+    let delCallCount = 0;
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => {
+            delCallCount++;
+            if (delCallCount === 1) {
+                t.equal(fileName, testFileName, 'deleted correct fileName on change');
+            } else if (delCallCount === 2) {
+                t.equal(fileName, testFileName, 'deleted correct fileName on unlink');
+            }
+        }
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);

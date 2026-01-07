@@ -93,14 +93,20 @@ function getStats(acceptsGzip, fileName, response, done) {
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
-        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
-        watcher.on('change', () => {
-            fileServer.cache.del(fileName);
+    const directoryName = path.dirname(fileName);
+    if (!watchers[directoryName]) {
+        // OPTIMIZATION: Create one watcher per directory, not per file.
+        // This prevents a huge number of watchers when serving many files.
+        const watcher = chokidar.watch(directoryName, { persistent: true, ignoreInitial: true });
+        watcher.on('change', (filePath) => {
+            fileServer.cache.del(filePath);
         });
-        watchers[fileName] = watcher;
+        watcher.on('unlink', (filePath) => {
+            fileServer.cache.del(filePath);
+        });
+        watchers[directoryName] = watcher;
         // Add to local instance for programmtic closing
-        this.watchers[fileName] = watcher;
+        this.watchers[directoryName] = watcher;
     }
 
     if (!fileName || typeof fileName !== 'string') {
