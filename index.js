@@ -90,16 +90,18 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _createWatcher = true) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // Bolt ⚡: Watcher creation is conditional to avoid redundant watchers when called from serveDirectory.
+    if (_createWatcher && !watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
+        // Add to local instance for programmatic closing
         this.watchers[fileName] = watcher;
     }
 
@@ -147,6 +149,23 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         throw new Error('Must provide a mimeTypes object to serveDirectory');
     }
 
+    // Bolt ⚡: Create one watcher per directory to avoid excessive overhead.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+        const onFileChange = (filePath) => {
+            fileServer.cache.del(filePath);
+            fileServer.cache.del(`${filePath}.gz`);
+        };
+
+        watcher.on('change', onFileChange);
+        watcher.on('unlink', onFileChange);
+
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmatic closing
+        this.watchers[rootDirectory] = watcher;
+    }
+
     const keys = Object.keys(mimeTypes);
 
     for (let i = 0; i < keys.length; i++) {
@@ -172,7 +191,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, false)(request, response);
     };
 };
 
