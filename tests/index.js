@@ -355,7 +355,7 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(5);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
@@ -373,7 +373,11 @@ test('serveFile watches files only once with chokidar', t => {
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.write = () => {};
+        this.read = () => {};
+        this.del = fileName => {
+            t.ok(fileName === testFileName || fileName === `${testFileName}.gz`, 'deleted correct fileName');
+        }
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -654,6 +658,47 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
     serveDirectory(testRequest, testResponse);
 });
 
+test('serveDirectory watches the directory only once with chokidar', t => {
+    t.plan(6);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+
+    let changeCallback;
+
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                t.ok(event === 'change' || event === 'unlink', 'got correct event');
+                changeCallback = callback;
+            },
+        };
+    };
+
+    mocks['stream-catcher'] = function() {
+        this.write = () => {};
+        this.read = () => {};
+        this.del = fileName => {
+            t.ok(fileName === testFileName || fileName === `${testFileName}.gz`, 'deleted correct fileName');
+        }
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+
+    const serveDirectory = fileServer.serveDirectory(testRootDirectory, {
+        '.txt': 'text/majigger'
+    });
+
+    serveDirectory(testRequest, testResponse, './bar/foo.txt');
+    serveDirectory(testRequest, testResponse, './bar/foo.txt');
+
+    changeCallback(testFileName);
+});
+
 test('close terminates all file watchers', t => {
     t.plan(3);
 
@@ -665,7 +710,7 @@ test('close terminates all file watchers', t => {
             on: () => {},
             close: () => {
                 closedConnections++;
-                Promise.resolve();
+                return Promise.resolve();
             },
         };
     };
