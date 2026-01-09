@@ -355,7 +355,7 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(5);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
@@ -372,8 +372,16 @@ test('serveFile watches files only once with chokidar', t => {
         };
     };
 
+    let delCallCount = 0;
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => {
+            if (delCallCount === 0) {
+                t.equal(fileName, testFileName, 'deleted correct fileName');
+            } else {
+                t.equal(fileName, `${testFileName}.gz`, 'deleted correct gzipped fileName');
+            }
+            delCallCount++;
+        };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
