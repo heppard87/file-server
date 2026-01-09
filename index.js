@@ -90,13 +90,19 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+// ⚡ Bolt: This function is used by serveDirectory, so we need a way to prevent creating a watcher for every file.
+// The _createWatcher flag is used to conditionally create a watcher.
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _createWatcher = true) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // ⚡ Bolt: Inefficiently creating a watcher for every file is a performance anti-pattern.
+    // This is now conditional to prevent redundant watchers when serving a directory.
+    if (_createWatcher && !watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
+            // ⚡ Bolt: When a file changes, we need to invalidate both the original and the gzipped version.
             fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -139,6 +145,26 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
     const fileServer = this;
 
+    // ⚡ Bolt: Create a single watcher for the entire directory to avoid excessive resource usage.
+    const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+    // ⚡ Bolt: When a file changes, invalidate its cache.
+    watcher.on('change', (filePath) => {
+        fileServer.cache.del(filePath);
+        fileServer.cache.del(`${filePath}.gz`);
+    });
+
+    // ⚡ Bolt: When a file is deleted, invalidate its cache.
+    watcher.on('unlink', (filePath) => {
+        fileServer.cache.del(filePath);
+        fileServer.cache.del(`${filePath}.gz`);
+    });
+
+    // ⚡ Bolt: Add the watcher to the instance watchers so it can be closed properly.
+    this.watchers[rootDirectory] = watcher;
+    // ⚡ Bolt: Also add to the global watchers object to prevent re-watching the same directory.
+    watchers[rootDirectory] = watcher;
+
     if (!rootDirectory || typeof rootDirectory !== 'string') {
         throw new Error('Must provide a rootDirectory to serveDirectory');
     }
@@ -172,7 +198,8 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        // ⚡ Bolt: Pass false to _createWatcher to prevent creating a new watcher for every file.
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, false)(request, response);
     };
 };
 
