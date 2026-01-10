@@ -355,7 +355,7 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(8);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
@@ -366,14 +366,14 @@ test('serveFile watches files only once with chokidar', t => {
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
+                t.ok(event === 'change' || event === 'unlink', 'got correct event');
                 callback();
             },
         };
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => t.ok(fileName === testFileName || fileName === `${testFileName}.gz`, 'deleted correct fileName');
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -695,4 +695,34 @@ test('close terminates all file watchers', t => {
         t.equal(Object.keys(fileServer.watchers).length, 0);
     });
 
+});
+
+test('serveDirectory watches directory only once with chokidar', t => {
+    t.plan(8);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                t.ok(event === 'change' || event === 'unlink', 'got correct event');
+                callback(testFileName);
+            },
+        };
+    };
+
+    mocks['stream-catcher'] = function() {
+        this.del = fileName => t.ok(fileName === testFileName || fileName === `${testFileName}.gz`, 'deleted correct fileName');
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const fileServer = new MockFileServer(() => {});
+
+    fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+    fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
 });

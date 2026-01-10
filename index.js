@@ -90,13 +90,21 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _createWatcher = true) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // Bolt ⚡: Create a watcher only when `serveFile` is called directly.
+    // When called from `serveDirectory`, a single directory-level watcher
+    // is used instead to avoid excessive resource consumption.
+    if (_createWatcher && !watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            fileServer.cache.del(fileName + '.gz');
+        });
+        watcher.on('unlink', () => {
+            fileServer.cache.del(fileName);
+            fileServer.cache.del(fileName + '.gz');
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -147,6 +155,24 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         throw new Error('Must provide a mimeTypes object to serveDirectory');
     }
 
+    // Bolt ⚡: Create a single watcher for the entire directory to reduce
+    // resource consumption. The `change` and `unlink` events invalidate the
+    // cache for the specific file that was modified.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        watcher.on('change', (fileName) => {
+            fileServer.cache.del(fileName);
+            fileServer.cache.del(fileName + '.gz');
+        });
+        watcher.on('unlink', (fileName) => {
+            fileServer.cache.del(fileName);
+            fileServer.cache.del(fileName + '.gz');
+        });
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[rootDirectory] = watcher;
+    }
+
     const keys = Object.keys(mimeTypes);
 
     for (let i = 0; i < keys.length; i++) {
@@ -172,7 +198,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, false)(request, response);
     };
 };
 
