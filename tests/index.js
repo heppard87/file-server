@@ -355,10 +355,11 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(8);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+    const eventListeners = {};
 
     mocks.chokidar.watch = (fileName, options) => {
         t.equal(fileName, testFileName, 'got correct fileName');
@@ -366,22 +367,36 @@ test('serveFile watches files only once with chokidar', t => {
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
-                callback();
+                eventListeners[event] = callback;
             },
         };
     };
 
+    const delCalls = [];
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => delCalls.push(fileName);
+        this.write = () => {};
+        this.read = () => {};
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
-
     const fileServer = new MockFileServer(() => {});
 
     fileServer.serveFile(testFileName);
     fileServer.serveFile(testFileName);
+
+    // Test change event
+    t.ok(eventListeners.change, 'registered change event');
+    eventListeners.change();
+    t.equal(delCalls[0], testFileName, 'deleted correct fileName on change');
+    t.equal(delCalls[1], `${testFileName}.gz`, 'deleted correct gz fileName on change');
+
+    // Test unlink event
+    delCalls.length = 0;
+    t.ok(eventListeners.unlink, 'registered unlink event');
+    eventListeners.unlink();
+    t.equal(delCalls[0], testFileName, 'deleted correct fileName on unlink');
+    t.equal(delCalls[1], `${testFileName}.gz`, 'deleted correct gz fileName on unlink');
 });
 
 test('process on exit cleans up watches', t => {
