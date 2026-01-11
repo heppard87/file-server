@@ -90,10 +90,12 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _createWatcher = true) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    if (_createWatcher && !watchers[fileName]) {
+        // Bolt ⚡: Create a watcher only when serveFile is called directly.
+        // This prevents creating redundant watchers when called from serveDirectory.
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
@@ -155,10 +157,31 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         }
     }
 
+    if (!watchers[rootDirectory]) {
+        // Bolt ⚡: Create a single watcher per directory to reduce resource usage.
+        // Previously, a new watcher was created for every file served.
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+        watcher.on('change', (filePath) => {
+            fileServer.cache.del(filePath);
+        });
+
+        // Bolt ⚡: Handle file deletion to invalidate the cache.
+        watcher.on('unlink', (filePath) => {
+            fileServer.cache.del(filePath);
+            // Bolt ⚡: Also invalidate the gzipped version of the file.
+            fileServer.cache.del(filePath + '.gz');
+        });
+
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[rootDirectory] = watcher;
+    }
+
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +195,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, false)(request, response);
     };
 };
 
