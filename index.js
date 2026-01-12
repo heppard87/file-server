@@ -5,6 +5,8 @@ const kgo = require('kgo');
 const StreamCatcher = require('stream-catcher');
 const chokidar = require('chokidar');
 
+// ⚡ Bolt: Using a single global watchers object prevents creating redundant watchers,
+// which can be a significant performance bottleneck when serving many files.
 const watchers = {};
 const cacheMaxSize = 1024 * 1000;
 
@@ -90,13 +92,22 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+// ⚡ Bolt: The _createWatcher flag prevents creating redundant file watchers
+// when serveFile is called from serveDirectory, which now manages its own directory-level watcher.
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _createWatcher = true) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    if (_createWatcher && !watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            // ⚡ Bolt: Also invalidate the gzipped version of the file from cache.
+            fileServer.cache.del(`${fileName}.gz`);
+        });
+        // ⚡ Bolt: When a file is deleted, we must remove it from the cache.
+        watcher.on('unlink', () => {
+            fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -124,7 +135,7 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
         ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
         (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
         (['*'], error => {
-            if (error.message && ~error.message.indexOf('ENOENT')) {
+            if (error && error.message && ~error.message.indexOf('ENOENT')) {
                 return fileServer.errorCallback(request, response, {
                     code: 404,
                     message: `404: Not Found ${fileName}`,
@@ -147,6 +158,27 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         throw new Error('Must provide a mimeTypes object to serveDirectory');
     }
 
+    // ⚡ Bolt: This is the core optimization. Instead of creating a watcher for every file,
+    // we create a single watcher for the entire directory. This significantly reduces
+    // resource consumption when serving directories with many files.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        watcher.on('change', (fileName) => {
+            fileServer.cache.del(fileName);
+             // ⚡ Bolt: Also invalidate the gzipped version of the file from cache.
+            fileServer.cache.del(`${fileName}.gz`);
+        });
+        // ⚡ Bolt: When a file is deleted, we must remove it from the cache.
+        watcher.on('unlink', (fileName) => {
+            fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
+        });
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[rootDirectory] = watcher;
+    }
+
+
     const keys = Object.keys(mimeTypes);
 
     for (let i = 0; i < keys.length; i++) {
@@ -158,7 +190,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +204,8 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        // ⚡ Bolt: Pass false to _createWatcher to prevent creating a redundant watcher.
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, false)(request, response);
     };
 };
 
@@ -183,7 +216,7 @@ FileServer.prototype.close = function(onClose) {
         closePromises.push(watcher.close());
         delete this.watchers[key];
     });
-    
+
     Promise.all(closePromises).then(() => {
         onClose();
     });
