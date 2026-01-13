@@ -90,13 +90,21 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _createWatcher = true) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // Bolt ⚡: To optimize performance, we conditionally create file watchers.
+    // When serving a directory, a single watcher is created for the entire directory,
+    // so we don't need to create additional watchers for each individual file.
+    if (_createWatcher && !watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
+        });
+        watcher.on('unlink', () => {
+            fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -147,6 +155,24 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         throw new Error('Must provide a mimeTypes object to serveDirectory');
     }
 
+    // Bolt ⚡: To optimize performance, we create a single watcher per directory.
+    // This avoids the overhead of creating a new watcher for every file.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+        const onFileChange = (filePath) => {
+            fileServer.cache.del(filePath);
+            fileServer.cache.del(`${filePath}.gz`);
+        };
+
+        watcher.on('change', onFileChange);
+        watcher.on('unlink', onFileChange);
+
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[rootDirectory] = watcher;
+    }
+
     const keys = Object.keys(mimeTypes);
 
     for (let i = 0; i < keys.length; i++) {
@@ -172,7 +198,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, false)(request, response);
     };
 };
 
