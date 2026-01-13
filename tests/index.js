@@ -354,11 +354,15 @@ test('serveFile passes create stream into cache', t => {
     serveFile(testRequest, testResponse);
 });
 
-test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+test('serveFile watches files for change and unlink', t => {
+    t.plan(8);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+    const eventHandlers = {};
+
+    let delCount = 0;
+    const expectedDeletes = [testFileName, `${testFileName}.gz`, testFileName, `${testFileName}.gz`];
 
     mocks.chokidar.watch = (fileName, options) => {
         t.equal(fileName, testFileName, 'got correct fileName');
@@ -366,14 +370,18 @@ test('serveFile watches files only once with chokidar', t => {
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
-                callback();
+                eventHandlers[event] = callback;
             },
         };
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.write = () => {};
+        this.read = () => {};
+        this.del = fileName => {
+            t.equal(fileName, expectedDeletes[delCount], `deleted correct fileName (${fileName})`);
+            delCount++;
+        };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -382,6 +390,12 @@ test('serveFile watches files only once with chokidar', t => {
 
     fileServer.serveFile(testFileName);
     fileServer.serveFile(testFileName);
+
+    t.ok(eventHandlers.change, 'change handler was set');
+    t.ok(eventHandlers.unlink, 'unlink handler was set');
+
+    eventHandlers.change();
+    eventHandlers.unlink();
 });
 
 test('process on exit cleans up watches', t => {
@@ -590,8 +604,52 @@ test('serveDirectory 404s if try to navigate up a level', t => {
     serveDirectory(testRequest, testResponse, testFile);
 });
 
+test('serveDirectory watches files for change and unlink', t => {
+    t.plan(8);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    const eventHandlers = {};
+
+    let delCount = 0;
+    const expectedDeletes = [testFileName, `${testFileName}.gz`, testFileName, `${testFileName}.gz`];
+
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                eventHandlers[event] = callback;
+            },
+        };
+    };
+
+    mocks['stream-catcher'] = function() {
+        this.write = () => {};
+        this.read = () => {};
+        this.del = fileName => {
+            t.equal(fileName, expectedDeletes[delCount], `deleted correct fileName (${fileName})`);
+            delCount++;
+        };
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const fileServer = new MockFileServer(() => {});
+
+    fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+    fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+
+    t.ok(eventHandlers.change, 'change handler was set');
+    t.ok(eventHandlers.unlink, 'unlink handler was set');
+
+    eventHandlers.change(testFileName);
+    eventHandlers.unlink(testFileName);
+});
+
 test('serveDirectory calls serveFile', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -608,10 +666,11 @@ test('serveDirectory calls serveFile', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _createWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(_createWatcher, false, '_createWatcher is correct');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -623,7 +682,7 @@ test('serveDirectory calls serveFile', t => {
 });
 
 test('serveDirectory calls serveFile with filename retrieved from url', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -640,10 +699,11 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _createWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(_createWatcher, false, '_createWatcher is correct');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');

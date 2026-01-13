@@ -90,13 +90,21 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+// A boolean flag `_createWatcher` is added to conditionally create a file watcher.
+// This prevents creating a new watcher for every file when `serveFile` is called
+// by `serveDirectory`, which now manages its own single watcher for the entire directory.
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _createWatcher = true) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    if (_createWatcher && !watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
+        });
+        watcher.on('unlink', () => {
+            fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -136,8 +144,28 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
     };
 };
 
+// The `serveDirectory` function is optimized to create a single `chokidar` watcher
+// for the entire directory. This watcher handles cache invalidation for all files
+// within the directory, avoiding the previous inefficiency of creating a separate
+// watcher for each file.
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
     const fileServer = this;
+
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+        watcher.on('change', (filePath) => {
+            fileServer.cache.del(filePath);
+            fileServer.cache.del(`${filePath}.gz`);
+        });
+        watcher.on('unlink', (filePath) => {
+            fileServer.cache.del(filePath);
+            fileServer.cache.del(`${filePath}.gz`);
+        });
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmtic closing
+        this.watchers[rootDirectory] = watcher;
+    }
 
     if (!rootDirectory || typeof rootDirectory !== 'string') {
         throw new Error('Must provide a rootDirectory to serveDirectory');
@@ -172,7 +200,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, false)(request, response);
     };
 };
 
