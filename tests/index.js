@@ -696,3 +696,30 @@ test('close terminates all file watchers', t => {
     });
 
 });
+
+test('serveDirectory creates only one watcher per directory', t => {
+    t.plan(1);
+
+    const mocks = getBaseMocks();
+    let watchCount = 0;
+
+    mocks.chokidar.watch = () => {
+        watchCount++;
+        return {
+            on: () => {},
+            close: () => Promise.resolve(),
+        };
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+    const serve = fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+
+    const request1 = { url: '/file1.txt' };
+    const request2 = { url: '/file2.txt' };
+
+    serve(request1, testResponse);
+    serve(request2, testResponse);
+
+    t.equal(watchCount, 1, 'only one watcher was created for the directory');
+});
