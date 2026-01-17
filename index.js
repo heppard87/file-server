@@ -90,13 +90,20 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+// Bolt ⚡: This flag is used to prevent creating a new watcher when serveFile
+// is called from serveDirectory, which now manages its own directory-level watcher.
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _suppressWatcher = false) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    if (!_suppressWatcher && !watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
+        });
+        watcher.on('unlink', () => {
+            fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -155,6 +162,24 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         }
     }
 
+    // Bolt ⚡: Replaced individual file watchers with a single directory watcher
+    // to reduce resource overhead. This watcher invalidates the cache for
+    // any changed or deleted file within the directory.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+        const invalidateCache = (filePath) => {
+            fileServer.cache.del(filePath);
+            fileServer.cache.del(`${filePath}.gz`);
+        }
+
+        watcher.on('change', invalidateCache);
+        watcher.on('unlink', invalidateCache);
+
+        watchers[rootDirectory] = watcher;
+        this.watchers[rootDirectory] = watcher;
+    }
+
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
@@ -172,7 +197,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, true)(request, response);
     };
 };
 
