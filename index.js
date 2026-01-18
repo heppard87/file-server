@@ -90,10 +90,10 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _suppressWatcher) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    if (!watchers[fileName] && !_suppressWatcher) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
@@ -147,6 +147,22 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         throw new Error('Must provide a mimeTypes object to serveDirectory');
     }
 
+    // Bolt ⚡: Create a single watcher for the entire directory to reduce resource usage.
+    // This avoids creating a new watcher for every single file request.
+    const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+    const onFileChange = (file) => {
+        fileServer.cache.del(file);
+        // Also invalidate the gzipped version of the file
+        fileServer.cache.del(`${file}.gz`);
+    };
+
+    watcher.on('change', onFileChange);
+    watcher.on('unlink', onFileChange);
+
+    watchers[rootDirectory] = watcher;
+    this.watchers[rootDirectory] = watcher;
+
     const keys = Object.keys(mimeTypes);
 
     for (let i = 0; i < keys.length; i++) {
@@ -158,7 +174,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +188,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, true)(request, response);
     };
 };
 
