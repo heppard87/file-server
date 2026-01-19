@@ -355,7 +355,7 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(5);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
@@ -373,7 +373,11 @@ test('serveFile watches files only once with chokidar', t => {
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        const expectedDeletes = [testFileName, `${testFileName}.gz`];
+        this.del = fileName => {
+            const expected = expectedDeletes.shift();
+            t.equal(fileName, expected, `deleted correct fileName (${expected})`);
+        };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -389,6 +393,14 @@ test('process on exit cleans up watches', t => {
 
     const mocks = getBaseMocks();
     const oldProcessOn = process.on;
+    let exitCallback;
+
+    // Capture the exit callback
+    process.on = function(event, callback) {
+        if (event === 'exit') {
+            exitCallback = callback;
+        }
+    };
 
     let MockFileServer;
 
@@ -401,21 +413,18 @@ test('process on exit cleans up watches', t => {
         this.del = () => {};
     };
 
-    process.on = function(event, callback) {
-        setTimeout(() => {
-            const fileServer = new MockFileServer(() => {});
-
-            fileServer.serveFile(testFileName);
-
-            callback();
-
-            oldProcessOn.call(process, event, callback);
-        }, 0);
-
-        process.on = oldProcessOn;
-    };
-
     MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const fileServer = new MockFileServer(() => {});
+    fileServer.serveFile(testFileName);
+
+    // Manually trigger the exit callback
+    if (exitCallback) {
+        exitCallback();
+    }
+
+    // Restore the original process.on
+    process.on = oldProcessOn;
 });
 
 test('serveFile checks for .gz file if gzip supported but uses original if not available', t => {
@@ -654,7 +663,7 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
     serveDirectory(testRequest, testResponse);
 });
 
-test('close terminates all file watchers', t => {
+test('close terminates all file watchers', async t => {
     t.plan(3);
 
     let closedConnections = 0;
@@ -665,7 +674,7 @@ test('close terminates all file watchers', t => {
             on: () => {},
             close: () => {
                 closedConnections++;
-                Promise.resolve();
+                return Promise.resolve();
             },
         };
     };
@@ -688,11 +697,10 @@ test('close terminates all file watchers', t => {
     serveDirectory(testRequest, testResponse);
     serveFile(testRequest, testResponse);
 
-    t.equal(Object.keys(fileServer.watchers).length, 2);
+    t.equal(Object.keys(fileServer.watchers).length, 2, 'correct number of watchers');
 
-    fileServer.close(() => {
-        t.equal(closedConnections, 2);
-        t.equal(Object.keys(fileServer.watchers).length, 0);
-    });
+    await fileServer.close();
 
+    t.equal(closedConnections, 2, 'closed all watchers');
+    t.equal(Object.keys(fileServer.watchers).length, 0, 'watchers object is empty');
 });
