@@ -90,13 +90,19 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+// Bolt ⚡: A new `_suppressWatcher` flag is added to prevent creating redundant file watchers
+// when serveFile is called internally by serveDirectory, which now manages its own directory-level watcher.
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _suppressWatcher = false) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // Bolt ⚡: This check ensures that we only create a watcher when serveFile is used directly,
+    // not when it's called from serveDirectory. This avoids creating a watcher for the directory
+    // AND for each file in it.
+    if (!_suppressWatcher && !watchers[fileName]) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -147,6 +153,25 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         throw new Error('Must provide a mimeTypes object to serveDirectory');
     }
 
+    // Bolt ⚡: To optimize performance, we create a single chokidar watcher per directory
+    // instead of one for every file. This significantly reduces the number of watchers
+    // and lowers resource consumption, especially when serving many files.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+        // When a file changes, invalidate its cache entry
+        watcher.on('change', (filePath) => {
+            fileServer.cache.del(filePath);
+            fileServer.cache.del(`${filePath}.gz`);
+        });
+        // When a file is deleted, also invalidate its cache entry
+        watcher.on('unlink', (filePath) => {
+            fileServer.cache.del(filePath);
+            fileServer.cache.del(`${filePath}.gz`);
+        });
+        watchers[rootDirectory] = watcher;
+        this.watchers[rootDirectory] = watcher;
+    }
+
     const keys = Object.keys(mimeTypes);
 
     for (let i = 0; i < keys.length; i++) {
@@ -158,7 +183,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,22 +197,34 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, true)(request, response);
     };
 };
 
+// Bolt ⚡: The close method is updated to ensure that watchers are removed from the
+// global watchers object in addition to the instance-specific one. This prevents
+// memory leaks and ensures that closed watchers are not accidentally reused.
 FileServer.prototype.close = function(onClose) {
     const closePromises = [];
     Object.keys(this.watchers).forEach((key) => {
         const watcher = this.watchers[key];
         closePromises.push(watcher.close());
+        delete watchers[key];
         delete this.watchers[key];
     });
-    
-    Promise.all(closePromises).then(() => {
+
+    const allPromises = Promise.all(closePromises);
+
+    if (!onClose) {
+        return allPromises;
+    }
+
+    allPromises.then(() => {
         onClose();
+    }).catch((error) => {
+        onClose(error);
     });
-}
+};
 
 process.on('exit', () => {
     Object.values(watchers).forEach(watcher => watcher.close());
