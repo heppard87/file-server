@@ -355,10 +355,12 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(6);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+
+    let changeCallback;
 
     mocks.chokidar.watch = (fileName, options) => {
         t.equal(fileName, testFileName, 'got correct fileName');
@@ -366,14 +368,24 @@ test('serveFile watches files only once with chokidar', t => {
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
-                callback();
+                t.pass(`got correct event: ${event}`);
+                if (event === 'change') {
+                    changeCallback = callback;
+                }
             },
         };
     };
 
+    let callCount = 0;
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => {
+            if (callCount === 0) {
+                t.equal(fileName, testFileName, 'deleted correct fileName');
+                callCount++;
+                return;
+            }
+            t.equal(fileName, `${testFileName}.gz`, 'deleted correct fileName');
+        }
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -382,6 +394,8 @@ test('serveFile watches files only once with chokidar', t => {
 
     fileServer.serveFile(testFileName);
     fileServer.serveFile(testFileName);
+
+    changeCallback();
 });
 
 test('process on exit cleans up watches', t => {
@@ -389,11 +403,10 @@ test('process on exit cleans up watches', t => {
 
     const mocks = getBaseMocks();
     const oldProcessOn = process.on;
-
-    let MockFileServer;
+    let exitCallback;
 
     mocks.chokidar.watch = () => ({
-        on: (event, callback) => callback(),
+        on: () => {},
         close: () => t.pass('closed watcher'),
     });
 
@@ -402,20 +415,19 @@ test('process on exit cleans up watches', t => {
     };
 
     process.on = function(event, callback) {
-        setTimeout(() => {
-            const fileServer = new MockFileServer(() => {});
-
-            fileServer.serveFile(testFileName);
-
-            callback();
-
-            oldProcessOn.call(process, event, callback);
-        }, 0);
-
-        process.on = oldProcessOn;
+        if (event === 'exit') {
+            exitCallback = callback;
+        }
     };
 
-    MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+
+    fileServer.serveFile(testFileName);
+
+    exitCallback();
+
+    process.on = oldProcessOn;
 });
 
 test('serveFile checks for .gz file if gzip supported but uses original if not available', t => {
@@ -652,6 +664,43 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
     };
 
     serveDirectory(testRequest, testResponse);
+});
+
+test('serveDirectory creates only one watcher', t => {
+    t.plan(3);
+
+    const mocks = getBaseMocks();
+    let watcherCount = 0;
+    mocks.chokidar.watch = () => {
+        watcherCount++;
+        return {
+            on: () => {},
+            close: () => Promise.resolve(),
+        };
+    };
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const fileServer = new MockFileServer(() => {});
+
+    const serveDirectory = fileServer.serveDirectory(
+        testRootDirectory,
+        {
+            '.txt': 'text/majigger',
+        },
+        testMaxAge,
+    );
+
+    serveDirectory(testRequest, testResponse, './bar/foo.txt');
+    serveDirectory(testRequest, testResponse, './bar/foo2.txt');
+    serveDirectory(testRequest, testResponse, './bar/foo3.txt');
+
+    t.equal(watcherCount, 1, 'watcherCount is correct');
+
+    fileServer.serveFile(testFileName, 'text/majigger', testMaxAge);
+    t.equal(watcherCount, 2, 'watcherCount is correct');
+
+    fileServer.serveFile(testFileName, 'text/majigger', testMaxAge);
+    t.equal(watcherCount, 2, 'watcherCount is correct');
 });
 
 test('close terminates all file watchers', t => {
