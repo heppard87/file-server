@@ -38,7 +38,7 @@ function getBaseMocks() {
     return {
         'graceful-fs': {
             stat: (fileName, callback) => {
-                callback(~fileName.indexOf('.gz'), {
+                callback(~fileName.indexOf('.gz') ? new Error('file not found') : null, {
                     isFile: function() {
                         return true;
                     },
@@ -50,6 +50,7 @@ function getBaseMocks() {
         'stream-catcher': function() {
             this.read = () => {};
             this.write = () => {};
+            this.del = () => {};
         },
         chokidar: {
             watch: function() {
@@ -389,33 +390,27 @@ test('process on exit cleans up watches', t => {
 
     const mocks = getBaseMocks();
     const oldProcessOn = process.on;
+    const oldProcessListeners = process.listeners;
 
-    let MockFileServer;
+    let exitHandler;
+
+    process.listeners = () => [];
+    process.on = (event, callback) => exitHandler = callback;
 
     mocks.chokidar.watch = () => ({
-        on: (event, callback) => callback(),
+        on: () => {},
         close: () => t.pass('closed watcher'),
     });
 
-    mocks['stream-catcher'] = function() {
-        this.del = () => {};
-    };
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
 
-    process.on = function(event, callback) {
-        setTimeout(() => {
-            const fileServer = new MockFileServer(() => {});
+    const fileServer = new MockFileServer(() => {});
+    fileServer.serveFile(testFileName);
 
-            fileServer.serveFile(testFileName);
+    exitHandler();
 
-            callback();
-
-            oldProcessOn.call(process, event, callback);
-        }, 0);
-
-        process.on = oldProcessOn;
-    };
-
-    MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    process.on = oldProcessOn;
+    process.listeners = oldProcessListeners;
 });
 
 test('serveFile checks for .gz file if gzip supported but uses original if not available', t => {
@@ -591,7 +586,7 @@ test('serveDirectory 404s if try to navigate up a level', t => {
 });
 
 test('serveDirectory calls serveFile', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -608,10 +603,11 @@ test('serveDirectory calls serveFile', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.pass(_suppressWatcher, '_suppressWatcher is correct');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -623,9 +619,9 @@ test('serveDirectory calls serveFile', t => {
 });
 
 test('serveDirectory calls serveFile with filename retrieved from url', t => {
-    t.plan(5);
+    t.plan(6);
 
-    const testFile = './bar/foo.txt';
+    const testFile = 'bar/foo.txt';
 
     const mocks = getBaseMocks();
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -640,10 +636,11 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.pass(_suppressWatcher, '_suppressWatcher is correct');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -654,45 +651,45 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
     serveDirectory(testRequest, testResponse);
 });
 
-test('close terminates all file watchers', t => {
-    t.plan(3);
-
-    let closedConnections = 0;
+test('serveDirectory watches directories only once with chokidar', t => {
+    t.plan(8);
 
     const mocks = getBaseMocks();
-    mocks.chokidar.watch = () => {
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+
+    let changeEventHandler;
+    let unlinkEventHandler;
+
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
         return {
-            on: () => {},
-            close: () => {
-                closedConnections++;
-                Promise.resolve();
+            on: function(event, callback) {
+                if (event === 'change') {
+                    changeEventHandler = callback;
+                    t.pass('got correct change event');
+                }
+                if (event === 'unlink') {
+                    unlinkEventHandler = callback;
+                    t.pass('got correct unlink event');
+                }
             },
         };
     };
-    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
 
+    mocks['stream-catcher'] = function() {
+        this.del = fileName => {
+            t.ok(fileName === testFileName || fileName === `${testFileName}.gz`, 'deleted correct fileName');
+        };
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
     const fileServer = new MockFileServer(() => {});
 
-    // Observe 2 files via each method
-    const serveDirectory = fileServer.serveDirectory(
-        testRootDirectory,
-        {
-            '.txt': 'text/majigger',
-        },
-        testMaxAge,
-    );
+    fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+    fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
 
-    const serveFile = fileServer.serveFile(testFileName);
-
-    // Watchers start on first request
-    serveDirectory(testRequest, testResponse);
-    serveFile(testRequest, testResponse);
-
-    t.equal(Object.keys(fileServer.watchers).length, 2);
-
-    fileServer.close(() => {
-        t.equal(closedConnections, 2);
-        t.equal(Object.keys(fileServer.watchers).length, 0);
-    });
-
+    changeEventHandler(testFileName);
+    unlinkEventHandler(testFileName);
 });
