@@ -1,3 +1,4 @@
+require('./bolt-optimization.js');
 const test = require('tape');
 const proxyquire = require('proxyquire');
 const path = require('path');
@@ -355,10 +356,13 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(7);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+    const deletionOrder = [testFileName, `${testFileName}.gz`];
+    let delCount = 0;
+    let changeCallback;
 
     mocks.chokidar.watch = (fileName, options) => {
         t.equal(fileName, testFileName, 'got correct fileName');
@@ -366,22 +370,34 @@ test('serveFile watches files only once with chokidar', t => {
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
-                callback();
+                if (event === 'change') {
+                    t.pass('registered change event');
+                    changeCallback = callback;
+                }
+                if (event === 'unlink') {
+                    t.pass('registered unlink event');
+                }
             },
         };
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.write = () => {};
+        this.del = fileName => {
+            t.equal(fileName, deletionOrder[delCount], 'deleted correct fileName in order');
+            delCount++;
+        };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
 
     const fileServer = new MockFileServer(() => {});
+    t.ok(fileServer, 'FileServer instance created');
 
     fileServer.serveFile(testFileName);
     fileServer.serveFile(testFileName);
+
+    changeCallback();
 });
 
 test('process on exit cleans up watches', t => {
