@@ -355,7 +355,7 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(5);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
@@ -372,8 +372,16 @@ test('serveFile watches files only once with chokidar', t => {
         };
     };
 
+    let delCallCount = 0;
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => {
+            delCallCount++;
+            if (delCallCount === 1) {
+                t.equal(fileName, testFileName, 'deleted correct fileName');
+            } else {
+                t.equal(fileName, `${testFileName}.gz`, 'deleted correct gz fileName');
+            }
+        };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -695,4 +703,47 @@ test('close terminates all file watchers', t => {
         t.equal(Object.keys(fileServer.watchers).length, 0);
     });
 
+});
+
+test('serveDirectory watches directories only once with chokidar', t => {
+    t.plan(8);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    const testMimeTypes = { '.txt': 'text/majigger' };
+
+    const eventCallbacks = {};
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct directory');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                eventCallbacks[event] = callback;
+                t.pass(`registered correct event: ${event}`);
+            },
+        };
+    };
+
+    let delCallCount = 0;
+    mocks['stream-catcher'] = function() {
+        this.write = () => {};
+        this.del = fileName => {
+            delCallCount++;
+            if (delCallCount % 2) {
+                t.equal(fileName, testFileName, 'deleted correct fileName on call ' + delCallCount);
+            } else {
+                t.equal(fileName, `${testFileName}.gz`, 'deleted correct gz fileName on call ' + delCallCount);
+            }
+        };
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+
+    fileServer.serveDirectory(testRootDirectory, testMimeTypes);
+    fileServer.serveDirectory(testRootDirectory, testMimeTypes);
+
+    eventCallbacks.change(testFileName); // change
+    eventCallbacks.unlink(testFileName); // unlink
 });
