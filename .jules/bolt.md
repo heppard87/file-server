@@ -1,0 +1,3 @@
+## 2024-05-20 - Excessive File Watchers
+**Learning:** Creating a new `chokidar` file watcher for every file served is a significant performance anti-pattern. When serving a directory, this can lead to an excessive number of watchers, consuming a large amount of memory and CPU resources.
+**Action:** When watching for file changes in a directory, use a single `chokidar` watcher for the entire directory. Use the events from this single watcher to invalidate the cache for individual files. This drastically reduces resource consumption.
