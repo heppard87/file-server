@@ -90,10 +90,12 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _suppressWatcher) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // Bolt: Inefficient watcher creation.
+    // A new watcher is created for every file. When serving a directory, this creates a new watcher for every request.
+    if (!watchers[fileName] && !_suppressWatcher) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
@@ -155,10 +157,31 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         }
     }
 
+    const directoryWatcherKey = `dir:${rootDirectory}`;
+
+    if (!watchers[directoryWatcherKey]) {
+        // Bolt: Inefficient watcher creation.
+        // Previously, a new watcher was created for every file request within a directory.
+        // This optimization creates a single watcher per directory, significantly
+        // reducing resource consumption.
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+        const onFileChange = filePath => {
+            fileServer.cache.del(filePath);
+            fileServer.cache.del(`${filePath}.gz`);
+        };
+
+        watcher.on('change', onFileChange);
+        watcher.on('unlink', onFileChange);
+
+        watchers[directoryWatcherKey] = watcher;
+        this.watchers[directoryWatcherKey] = watcher;
+    }
+
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
-        } 
+        }
 
         const filePath = path.join(rootDirectory, fileName);
 
@@ -172,7 +195,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, true)(request, response);
     };
 };
 

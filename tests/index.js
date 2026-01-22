@@ -696,3 +696,119 @@ test('close terminates all file watchers', t => {
     });
 
 });
+
+test('Directory watcher', t => {
+    t.plan(7);
+
+    const mockChokidar = {
+        watchers: {},
+        watch: function(dir) {
+            this.watchers[dir] = {
+                listeners: {},
+                on: (event, callback) => {
+                    this.watchers[dir].listeners[event] = callback;
+                },
+                close: () => {
+                    delete this.watchers[dir];
+                    return Promise.resolve();
+                },
+                trigger: (event, filePath) => {
+                    if (this.watchers[dir] && this.watchers[dir].listeners[event]) {
+                        this.watchers[dir].listeners[event](filePath);
+                    }
+                }
+            };
+            return this.watchers[dir];
+        },
+        getWatcher: function(dir) {
+            return this.watchers[dir];
+        },
+        clear: function() {
+            this.watchers = {};
+        }
+    };
+
+    const mockStreamCatcher = {
+        cache: {},
+        write: function(key, response, createReadStream) {
+            this.cache[key] = true;
+            createReadStream(key);
+        },
+        del: function(key) {
+            delete this.cache[key];
+        },
+        read: function(key, stream) {
+            this.cache[key] = stream;
+        },
+        clear: function() {
+            this.cache = {};
+        }
+    };
+
+    const mocks = getBaseMocks();
+    mocks['chokidar'] = mockChokidar;
+    mocks['stream-catcher'] = function() {
+        return mockStreamCatcher;
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    mockChokidar.clear();
+    mockStreamCatcher.clear();
+
+    const fileServer = new MockFileServer(() => {});
+    const serveDirectory = fileServer.serveDirectory(__dirname, {
+        '.js': 'application/javascript'
+    });
+
+    const mockRequest = {
+        headers: {},
+        url: '/index.js'
+    };
+    const mockResponse = {
+        setHeader: () => {},
+        writeHead: () => {},
+        end: () => {},
+        on: () => {}
+    };
+
+    serveDirectory(mockRequest, mockResponse);
+
+    t.equal(Object.keys(mockChokidar.watchers).length, 1, 'should create only one watcher for the directory');
+    const watcher = mockChokidar.getWatcher(__dirname);
+    t.ok(watcher, 'watcher should be created for the correct directory');
+
+    const anotherMockRequest = {
+        headers: {},
+        url: '/another-file.js'
+    };
+
+    // Create a dummy file in the cache to be deleted
+    const anotherFilePath = path.join(__dirname, 'another-file.js');
+    mockStreamCatcher.cache[anotherFilePath] = true;
+    mockStreamCatcher.cache[anotherFilePath + '.gz'] = true;
+
+
+    serveDirectory(anotherMockRequest, mockResponse);
+    t.equal(Object.keys(mockChokidar.watchers).length, 1, 'should still have only one watcher after serving another file');
+
+
+    const changedFilePath = path.join(__dirname, 'somefile.js');
+    mockStreamCatcher.cache[changedFilePath] = true;
+    mockStreamCatcher.cache[changedFilePath + '.gz'] = true;
+
+
+    watcher.trigger('change', changedFilePath);
+
+    t.notOk(mockStreamCatcher.cache[changedFilePath], 'cache should be invalidated on file change');
+    t.notOk(mockStreamCatcher.cache[changedFilePath + '.gz'], 'gzipped cache should be invalidated on file change');
+
+    const unlinkedFilePath = path.join(__dirname, 'anotherfile.js');
+    mockStreamCatcher.cache[unlinkedFilePath] = true;
+    mockStreamCatcher.cache[unlinkedFilePath + '.gz'] = true;
+
+    watcher.trigger('unlink', unlinkedFilePath);
+
+    t.notOk(mockStreamCatcher.cache[unlinkedFilePath], 'cache should be invalidated on file unlink');
+    t.notOk(mockStreamCatcher.cache[unlinkedFilePath + '.gz'], 'gzipped cache should be invalidated on file unlink');
+});
