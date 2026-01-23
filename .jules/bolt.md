@@ -1,0 +1,3 @@
+## 2024-05-21 - Inefficient File Watching
+**Learning:** Creating a new `chokidar` file watcher for every single file served via `serveFile` is highly inefficient and leads to excessive resource consumption, especially when serving a directory with many files. The `serveDirectory` function was calling `serveFile` for each request, creating a new watcher each time.
+**Action:** Refactor `serveDirectory` to create a single `chokidar` watcher for the entire directory. Use a flag to prevent `serveFile` from creating its own watcher when called from `serveDirectory`. This will significantly reduce the number of active file watchers.
