@@ -591,7 +591,7 @@ test('serveDirectory 404s if try to navigate up a level', t => {
 });
 
 test('serveDirectory calls serveFile', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -608,10 +608,11 @@ test('serveDirectory calls serveFile', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(suppressWatcher, true, 'suppressWatcher is correct');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -622,8 +623,38 @@ test('serveDirectory calls serveFile', t => {
     serveDirectory(testRequest, testResponse, testFile);
 });
 
+test('serveDirectory watches directories only once with chokidar', t => {
+    t.plan(1);
+
+    const mocks = getBaseMocks();
+    let watchCount = 0;
+
+    mocks.chokidar.watch = (path, options) => {
+        if (path === testRootDirectory) {
+            watchCount++;
+        }
+        return {
+            on: () => {},
+            close: () => Promise.resolve(),
+        };
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const fileServer = new MockFileServer(() => {});
+
+    fileServer.serveDirectory(testRootDirectory, {
+        '.txt': 'text/majigger',
+    });
+    fileServer.serveDirectory(testRootDirectory, {
+        '.txt': 'text/majigger',
+    });
+
+    t.equal(watchCount, 1, 'chokidar.watch called only once');
+});
+
 test('serveDirectory calls serveFile with filename retrieved from url', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -640,10 +671,11 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(suppressWatcher, true, 'suppressWatcher is correct');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
