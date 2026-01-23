@@ -355,10 +355,11 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(5);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+    let delCallCount = 0;
 
     mocks.chokidar.watch = (fileName, options) => {
         t.equal(fileName, testFileName, 'got correct fileName');
@@ -373,7 +374,14 @@ test('serveFile watches files only once with chokidar', t => {
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => {
+            delCallCount++;
+            if (delCallCount === 1) {
+                t.equal(fileName, testFileName, 'deleted correct fileName');
+                return;
+            }
+            t.equal(fileName, `${testFileName}.gz`, 'deleted correct gzipped fileName');
+        };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -652,6 +660,70 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
     };
 
     serveDirectory(testRequest, testResponse);
+});
+
+test('serveDirectory watches the directory and invalidates cache on change', t => {
+    t.plan(9);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    const testFile = 'some-file.txt';
+    const testFilePath = path.join(testRootDirectory, testFile);
+    let delCallCount = 0;
+    let watchCallCount = 0;
+    let changeCallback;
+    let unlinkCallback;
+
+    mocks.chokidar.watch = (directory, options) => {
+        watchCallCount++;
+        t.equal(directory, testRootDirectory, 'watches the correct directory');
+        t.deepEqual(options, expectedOptions, 'uses correct chokidar options');
+
+        return {
+            on: function(event, callback) {
+                if (event === 'change') {
+                    changeCallback = callback;
+                }
+                if (event === 'unlink') {
+                    unlinkCallback = callback;
+                }
+            },
+            close: () => Promise.resolve(),
+        };
+    };
+
+    mocks['stream-catcher'] = function() {
+        this.del = fileName => {
+            delCallCount++;
+            if (delCallCount === 1 || delCallCount === 3) {
+                t.equal(fileName, testFilePath, 'deleted correct fileName');
+                return;
+            }
+            t.equal(fileName, `${testFilePath}.gz`, 'deleted correct gzipped fileName');
+        };
+        this.write = () => {};
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+
+    fileServer.serveFile = function(fileName, mimeType, maxAge, suppressWatcher) {
+        t.ok(suppressWatcher, 'serveFile called with suppressWatcher flag');
+        return () => {};
+    };
+
+    const serve = fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+    serve(testRequest, testResponse, testFile);
+
+    // Call it again to ensure watcher is only created once
+    const serve2 = fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+    serve2(testRequest, testResponse, testFile);
+
+    t.equal(watchCallCount, 1, 'chokidar.watch called only once');
+
+    // Trigger file change and unlink to test cache invalidation
+    changeCallback(testFilePath);
+    unlinkCallback(testFilePath);
 });
 
 test('close terminates all file watchers', t => {
