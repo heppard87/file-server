@@ -90,13 +90,18 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _suppressWatcher) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    if (!watchers[fileName] && !_suppressWatcher) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
+        });
+        watcher.on('unlink', () => {
+            fileServer.cache.del(fileName);
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -155,6 +160,22 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         }
     }
 
+    const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+    const rootDirectoryWatcherKey = `dir:${rootDirectory}`;
+
+    watcher.on('change', (filePath) => {
+        fileServer.cache.del(filePath);
+        fileServer.cache.del(`${filePath}.gz`);
+    });
+    watcher.on('unlink', (filePath) => {
+        fileServer.cache.del(filePath);
+        fileServer.cache.del(`${filePath}.gz`);
+    });
+    watchers[rootDirectoryWatcherKey] = watcher;
+    // Add to local instance for programmtic closing
+    this.watchers[rootDirectoryWatcherKey] = watcher;
+
+
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
@@ -172,7 +193,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, true)(request, response);
     };
 };
 
