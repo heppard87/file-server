@@ -1,0 +1,3 @@
+## 2024-05-20 - Watcher Storm Anti-Pattern
+**Learning:** Creating a new `chokidar` file watcher for every file served is a significant performance anti-pattern. When serving a directory, this leads to a "watcher storm" that consumes excessive system resources.
+**Action:** Refactor the code to use a single `chokidar` watcher per directory. This can be achieved by creating the watcher in the `serveDirectory` function and passing a flag to `serveFile` to suppress the creation of redundant watchers.
