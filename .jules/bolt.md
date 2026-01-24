@@ -1,0 +1,3 @@
+## 2024-05-20 - Redundant File Watchers
+**Learning:** Creating a new `chokidar` file watcher for every file served, especially when serving a directory, is a significant performance anti-pattern. This leads to excessive resource consumption (memory, CPU) and can slow down the application, particularly in directories with many files. The correct approach is to use a single watcher per directory.
+**Action:** When serving directories, create a single `chokidar` watcher for the entire directory and use its events to manage cache invalidation for individual files. Avoid creating watchers in `serveFile` when it's called from `serveDirectory`.
