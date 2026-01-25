@@ -355,7 +355,7 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(5);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
@@ -373,7 +373,15 @@ test('serveFile watches files only once with chokidar', t => {
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        let a = 1;
+        this.del = fileName => {
+            if (a === 1) {
+                a = a + 1;
+                t.equal(fileName, testFileName, 'deleted correct fileName');
+            } else {
+                t.equal(fileName, `${testFileName}.gz`, 'deleted correct fileName');
+            }
+        };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -389,8 +397,7 @@ test('process on exit cleans up watches', t => {
 
     const mocks = getBaseMocks();
     const oldProcessOn = process.on;
-
-    let MockFileServer;
+    let exitCallback;
 
     mocks.chokidar.watch = () => ({
         on: (event, callback) => callback(),
@@ -401,21 +408,30 @@ test('process on exit cleans up watches', t => {
         this.del = () => {};
     };
 
+    // 1. Monkey-patch process.on to capture the exit handler
     process.on = function(event, callback) {
-        setTimeout(() => {
-            const fileServer = new MockFileServer(() => {});
-
-            fileServer.serveFile(testFileName);
-
-            callback();
-
-            oldProcessOn.call(process, event, callback);
-        }, 0);
-
-        process.on = oldProcessOn;
+        if (event === 'exit') {
+            exitCallback = callback;
+        }
     };
 
-    MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    try {
+        // 2. Load the module, which will register the exit handler with our mock
+        const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+        const fileServer = new MockFileServer(() => {});
+        fileServer.serveFile(testFileName);
+
+        // 3. Manually trigger the exit handler
+        if (exitCallback) {
+            exitCallback();
+        } else {
+            t.fail('exit handler was not registered');
+        }
+
+    } finally {
+        // 4. Restore the original process.on
+        process.on = oldProcessOn;
+    }
 });
 
 test('serveFile checks for .gz file if gzip supported but uses original if not available', t => {
@@ -591,7 +607,7 @@ test('serveDirectory 404s if try to navigate up a level', t => {
 });
 
 test('serveDirectory calls serveFile', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -608,10 +624,11 @@ test('serveDirectory calls serveFile', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(_suppressWatcher, true, '_suppressWatcher is correct');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -623,7 +640,7 @@ test('serveDirectory calls serveFile', t => {
 });
 
 test('serveDirectory calls serveFile with filename retrieved from url', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -640,10 +657,11 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(_suppressWatcher, true, '_suppressWatcher is correct');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -652,6 +670,64 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
     };
 
     serveDirectory(testRequest, testResponse);
+});
+
+test('serveDirectory watches directories only once with chokidar', t => {
+    t.plan(8);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    const handlers = {};
+    let watcher;
+
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        watcher = {
+            on: function(event, callback) {
+                handlers[event] = callback;
+            },
+        };
+        return watcher;
+    };
+
+    let delCallCount = 0;
+    mocks['stream-catcher'] = function() {
+        this.del = fileName => {
+            delCallCount++;
+            if (delCallCount === 1 || delCallCount === 3) {
+                t.equal(fileName, testFileName, 'deleted correct fileName on change');
+            } else {
+                t.equal(fileName, `${testFileName}.gz`, 'deleted correct fileName on change');
+            }
+        };
+        this.write = () => {};
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+
+    fileServer.serveDirectory(
+        testRootDirectory,
+        {
+            '.txt': 'text/majigger',
+        },
+        testMaxAge,
+    );
+    // Call it a second time to ensure the watcher is only created once
+    fileServer.serveDirectory(
+        testRootDirectory,
+        {
+            '.txt': 'text/majigger',
+        },
+        testMaxAge,
+    );
+
+    t.equal(typeof handlers.change, 'function', 'change handler registered');
+    handlers.change(testFileName);
+    t.equal(typeof handlers.unlink, 'function', 'unlink handler registered');
+    handlers.unlink(testFileName);
 });
 
 test('close terminates all file watchers', t => {
@@ -665,7 +741,7 @@ test('close terminates all file watchers', t => {
             on: () => {},
             close: () => {
                 closedConnections++;
-                Promise.resolve();
+                return Promise.resolve();
             },
         };
     };
