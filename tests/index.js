@@ -355,12 +355,14 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(5);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+    let watchCallCount = 0;
 
     mocks.chokidar.watch = (fileName, options) => {
+        watchCallCount++;
         t.equal(fileName, testFileName, 'got correct fileName');
         t.deepEqual(options, expectedOptions, 'got correct options');
 
@@ -374,6 +376,8 @@ test('serveFile watches files only once with chokidar', t => {
 
     mocks['stream-catcher'] = function() {
         this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.read = () => {};
+        this.write = () => {};
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -382,6 +386,62 @@ test('serveFile watches files only once with chokidar', t => {
 
     fileServer.serveFile(testFileName);
     fileServer.serveFile(testFileName);
+    fileServer.serveFile(testFileName, 'text/plain', 0, true); // This one should not trigger a watch
+    t.equal(watchCallCount, 1, 'chokidar.watch was only called once');
+});
+
+test('serveDirectory watches directories only once with chokidar', t => {
+    t.plan(7);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    const deletedFiles = [];
+    let watchCallCount = 0;
+    let changeCallback;
+    let unlinkCallback;
+
+    mocks.chokidar.watch = (fileName, options) => {
+        watchCallCount++;
+        t.equal(fileName, testRootDirectory, 'got correct directory');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                if (event === 'change') {
+                    t.pass('registered change event');
+                    changeCallback = callback;
+                }
+                if (event === 'unlink') {
+                    t.pass('registered unlink event');
+                    unlinkCallback = callback;
+                }
+            },
+        };
+    };
+
+    mocks['stream-catcher'] = function() {
+        this.del = fileName => deletedFiles.push(fileName);
+        this.read = () => {};
+        this.write = () => {};
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+
+    const serveDirectory = fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' });
+
+    serveDirectory(testRequest, testResponse);
+    // Call it again to make sure watch is only called once
+    fileServer.serveDirectory(testRootDirectory, { '.txt': 'text/plain' })(testRequest, testResponse);
+
+    changeCallback(testFileName);
+    t.deepEqual(deletedFiles, [testFileName, `${testFileName}.gz`], 'deleted correct files on change');
+    deletedFiles.length = 0; // reset
+
+    unlinkCallback(testFileName);
+    t.deepEqual(deletedFiles, [testFileName, `${testFileName}.gz`], 'deleted correct files on unlink');
+
+    t.equal(watchCallCount, 1, 'chokidar.watch was only called once');
 });
 
 test('process on exit cleans up watches', t => {
@@ -591,7 +651,7 @@ test('serveDirectory 404s if try to navigate up a level', t => {
 });
 
 test('serveDirectory calls serveFile', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -608,10 +668,11 @@ test('serveDirectory calls serveFile', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(_suppressWatcher, true, '_suppressWatcher is true');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -623,9 +684,9 @@ test('serveDirectory calls serveFile', t => {
 });
 
 test('serveDirectory calls serveFile with filename retrieved from url', t => {
-    t.plan(5);
+    t.plan(6);
 
-    const testFile = './bar/foo.txt';
+    const testFile = 'bar/foo.txt';
 
     const mocks = getBaseMocks();
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -640,10 +701,11 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(_suppressWatcher, true, '_suppressWatcher is true');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -665,7 +727,7 @@ test('close terminates all file watchers', t => {
             on: () => {},
             close: () => {
                 closedConnections++;
-                Promise.resolve();
+                return Promise.resolve();
             },
         };
     };
@@ -688,11 +750,11 @@ test('close terminates all file watchers', t => {
     serveDirectory(testRequest, testResponse);
     serveFile(testRequest, testResponse);
 
-    t.equal(Object.keys(fileServer.watchers).length, 2);
+    t.equal(Object.keys(fileServer.watchers).length, 2, 'two watchers were created');
 
     fileServer.close(() => {
-        t.equal(closedConnections, 2);
-        t.equal(Object.keys(fileServer.watchers).length, 0);
+        t.equal(closedConnections, 2, 'two watchers were closed');
+        t.equal(Object.keys(fileServer.watchers).length, 0, 'watchers object is empty');
     });
 
 });
