@@ -90,13 +90,24 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _suppressWatcher = false) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
+    // ⚡ Bolt: This is the optimization.
+    // We only create a watcher if one doesn't already exist for this file and
+    // the call to serveFile hasn't suppressed it. This is to prevent creating
+    // redundant watchers when serving a whole directory.
+    if (!watchers[fileName] && !_suppressWatcher) {
         const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
         watcher.on('change', () => {
             fileServer.cache.del(fileName);
+            // Also invalidate the gzipped version of the file
+            fileServer.cache.del(`${fileName}.gz`);
+        });
+        watcher.on('unlink', () => {
+            fileServer.cache.del(fileName);
+            // Also invalidate the gzipped version of the file
+            fileServer.cache.del(`${fileName}.gz`);
         });
         watchers[fileName] = watcher;
         // Add to local instance for programmtic closing
@@ -139,6 +150,27 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
 FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge = 0) {
     const fileServer = this;
 
+    // ⚡ Bolt: This is the optimization.
+    // Instead of creating a new file watcher for every file, we create a single
+    // watcher for the entire directory. This significantly reduces resource usage
+    // when serving many files from the same directory.
+    if (!watchers[rootDirectory]) {
+        const watcher = chokidar.watch(rootDirectory, { persistent: true, ignoreInitial: true });
+
+        const clearCache = (filePath) => {
+            fileServer.cache.del(filePath);
+            // Also invalidate the gzipped version of the file
+            fileServer.cache.del(`${filePath}.gz`);
+        }
+
+        watcher.on('change', clearCache);
+        watcher.on('unlink', clearCache);
+
+        watchers[rootDirectory] = watcher;
+        // Add to local instance for programmatic closing
+        this.watchers[rootDirectory] = watcher;
+    }
+
     if (!rootDirectory || typeof rootDirectory !== 'string') {
         throw new Error('Must provide a rootDirectory to serveDirectory');
     }
@@ -172,7 +204,7 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, true)(request, response);
     };
 };
 
