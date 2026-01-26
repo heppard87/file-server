@@ -354,34 +354,128 @@ test('serveFile passes create stream into cache', t => {
     serveFile(testRequest, testResponse);
 });
 
-test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+test('serveFile watches files only once with chokidar and handles change/unlink', t => {
+    t.plan(7);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+    let watchCallCount = 0;
+    let changeCallback;
+    let unlinkCallback;
 
     mocks.chokidar.watch = (fileName, options) => {
+        watchCallCount++;
         t.equal(fileName, testFileName, 'got correct fileName');
         t.deepEqual(options, expectedOptions, 'got correct options');
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
-                callback();
+                if (event === 'change') {
+                    t.pass('registered change event');
+                    changeCallback = callback;
+                } else if (event === 'unlink') {
+                    t.pass('registered unlink event');
+                    unlinkCallback = callback;
+                }
+            },
+        };
+    };
+
+    const deletedFiles = [];
+    mocks['stream-catcher'] = function() {
+        this.del = fileName => deletedFiles.push(fileName);
+        this.read = () => {}; // from base mock
+        this.write = () => {}; // from base mock
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+
+    // Call it twice to ensure watcher is only created once
+    fileServer.serveFile(testFileName);
+    fileServer.serveFile(testFileName);
+
+    t.equal(watchCallCount, 1, 'chokidar.watch called only once');
+
+    // Trigger change
+    changeCallback();
+    t.deepEqual(deletedFiles.sort(), [testFileName, `${testFileName}.gz`].sort(), 'deleted correct files from cache on change');
+
+    // Trigger unlink
+    deletedFiles.length = 0;
+    unlinkCallback();
+    t.deepEqual(deletedFiles.sort(), [testFileName, `${testFileName}.gz`].sort(), 'deleted correct files from cache on unlink');
+});
+
+test('serveDirectory watches directories only once with chokidar', t => {
+    t.plan(9);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    const testFile1 = 'foo.txt';
+    const testFile2 = 'bar.txt';
+    const deletedFiles = [];
+    let watchCallCount = 0;
+    let changeCallback;
+    let unlinkCallback;
+
+    mocks.chokidar.watch = (fileName, options) => {
+        watchCallCount++;
+        t.equal(fileName, testRootDirectory, 'got correct directory to watch');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                if (event === 'change') {
+                    t.pass('registered change event');
+                    changeCallback = callback;
+                } else if (event === 'unlink') {
+                    t.pass('registered unlink event');
+                    unlinkCallback = callback;
+                }
             },
         };
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => deletedFiles.push(fileName);
+        this.read = () => {};
+        this.write = () => {};
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(createErrorCallback(t, testError, testResponse));
 
-    const fileServer = new MockFileServer(() => {});
+    let serveFileCallCount = 0;
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _suppressWatcher) {
+        serveFileCallCount++;
+        t.ok(_suppressWatcher, `serveFile called with _suppressWatcher=true for file ${serveFileCallCount}`);
+        // Must return a function, as the original does.
+        return function(request, response) {};
+    };
 
-    fileServer.serveFile(testFileName);
-    fileServer.serveFile(testFileName);
+    const serveDirectory = fileServer.serveDirectory(
+        testRootDirectory, {
+            '.txt': 'text/plain',
+        }
+    );
+
+    // Serve two different files from the same directory
+    serveDirectory(testRequest, testResponse, testFile1);
+    serveDirectory(testRequest, testResponse, testFile2);
+
+    t.equal(watchCallCount, 1, 'chokidar.watch called only once for directory');
+
+    // Trigger change event
+    const changedFilePath = path.join(testRootDirectory, 'changed.txt');
+    changeCallback(changedFilePath);
+    t.deepEqual(deletedFiles.sort(), [changedFilePath, `${changedFilePath}.gz`].sort(), 'deleted correct files from cache on change');
+
+    // Reset and trigger unlink event
+    deletedFiles.length = 0;
+    const unlinkedFilePath = path.join(testRootDirectory, 'unlinked.txt');
+    unlinkCallback(unlinkedFilePath);
+    t.deepEqual(deletedFiles.sort(), [unlinkedFilePath, `${unlinkedFilePath}.gz`].sort(), 'deleted correct files from cache on unlink');
 });
 
 test('process on exit cleans up watches', t => {
