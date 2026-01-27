@@ -355,10 +355,11 @@ test('serveFile passes create stream into cache', t => {
 });
 
 test('serveFile watches files only once with chokidar', t => {
-    t.plan(4);
+    t.plan(6);
 
     const mocks = getBaseMocks();
     const expectedOptions = { persistent: true, ignoreInitial: true };
+    let changeCallback;
 
     mocks.chokidar.watch = (fileName, options) => {
         t.equal(fileName, testFileName, 'got correct fileName');
@@ -366,14 +367,21 @@ test('serveFile watches files only once with chokidar', t => {
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
-                callback();
+                t.assert(event === 'change' || event === 'unlink', 'got correct event');
+
+                if (event === 'change') {
+                    changeCallback = callback
+                }
             },
         };
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.write = () => {};
+        this.read = () => {};
+        this.del = fileName => {
+            t.assert(fileName === testFileName || fileName === `${testFileName}.gz`, 'deleted correct fileName');
+        }
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -382,6 +390,7 @@ test('serveFile watches files only once with chokidar', t => {
 
     fileServer.serveFile(testFileName);
     fileServer.serveFile(testFileName);
+    changeCallback();
 });
 
 test('process on exit cleans up watches', t => {
@@ -389,33 +398,39 @@ test('process on exit cleans up watches', t => {
 
     const mocks = getBaseMocks();
     const oldProcessOn = process.on;
+    let exitHandler;
 
-    let MockFileServer;
-
-    mocks.chokidar.watch = () => ({
-        on: (event, callback) => callback(),
-        close: () => t.pass('closed watcher'),
-    });
-
-    mocks['stream-catcher'] = function() {
-        this.del = () => {};
-    };
-
+    // Replace process.on with a mock to capture the exit handler
     process.on = function(event, callback) {
-        setTimeout(() => {
-            const fileServer = new MockFileServer(() => {});
-
-            fileServer.serveFile(testFileName);
-
-            callback();
-
-            oldProcessOn.call(process, event, callback);
-        }, 0);
-
-        process.on = oldProcessOn;
+        if (event === 'exit') {
+            exitHandler = callback;
+        }
     };
 
-    MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    try {
+        mocks.chokidar.watch = () => ({
+            on: () => {},
+            close: () => t.pass('closed watcher'),
+        });
+
+        mocks['stream-catcher'] = function() {
+            this.del = () => {};
+        };
+
+        // Load the module with the mock in place
+        const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+        const fileServer = new MockFileServer(() => {});
+
+        // This call creates a watcher that needs cleanup
+        fileServer.serveFile(testFileName);
+
+        // Manually trigger the exit handler to test the cleanup logic
+        exitHandler();
+
+    } finally {
+        // ALWAYS restore the original process.on to avoid polluting other tests
+        process.on = oldProcessOn;
+    }
 });
 
 test('serveFile checks for .gz file if gzip supported but uses original if not available', t => {
@@ -652,6 +667,46 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
     };
 
     serveDirectory(testRequest, testResponse);
+});
+
+test('serveDirectory watches directories only once with chokidar', t => {
+    t.plan(6);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    let changeCallback;
+
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                t.assert(event === 'change' || event === 'unlink', 'got correct event');
+                if (event === 'change') {
+                    changeCallback = callback;
+                }
+            },
+        };
+    };
+
+    mocks['stream-catcher'] = function() {
+        this.write = () => {};
+        this.read = () => {};
+        this.del = fileName => {
+            t.assert(fileName === testFileName || fileName === `${testFileName}.gz`, 'deleted correct fileName');
+        }
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+    const serveDirectory = fileServer.serveDirectory(testRootDirectory, {
+        '.txt': 'text/plain',
+    });
+
+    serveDirectory(testRequest, testResponse, testFileName);
+    serveDirectory(testRequest, testResponse, testFileName);
+    changeCallback(testFileName);
 });
 
 test('close terminates all file watchers', t => {
