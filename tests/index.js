@@ -591,7 +591,7 @@ test('serveDirectory 404s if try to navigate up a level', t => {
 });
 
 test('serveDirectory calls serveFile', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -608,10 +608,11 @@ test('serveDirectory calls serveFile', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(_suppressWatcher, true, '_suppressWatcher is true');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -623,7 +624,7 @@ test('serveDirectory calls serveFile', t => {
 });
 
 test('serveDirectory calls serveFile with filename retrieved from url', t => {
-    t.plan(5);
+    t.plan(6);
 
     const testFile = './bar/foo.txt';
 
@@ -640,10 +641,11 @@ test('serveDirectory calls serveFile with filename retrieved from url', t => {
         testMaxAge,
     );
 
-    fileServer.serveFile = function(fileName, mimeType, maxAge) {
+    fileServer.serveFile = function(fileName, mimeType, maxAge, _suppressWatcher) {
         t.equal(fileName, path.join(testRootDirectory, testFile), 'fileName is correct');
         t.equal(mimeType, 'text/majigger', 'mimeType is correct');
         t.equal(maxAge, testMaxAge, 'maxAge is correct');
+        t.equal(_suppressWatcher, true, '_suppressWatcher is true');
 
         return function(request, response) {
             t.equal(request, testRequest, 'request is correct');
@@ -665,7 +667,7 @@ test('close terminates all file watchers', t => {
             on: () => {},
             close: () => {
                 closedConnections++;
-                Promise.resolve();
+                return Promise.resolve();
             },
         };
     };
@@ -695,4 +697,60 @@ test('close terminates all file watchers', t => {
         t.equal(Object.keys(fileServer.watchers).length, 0);
     });
 
+});
+
+test('serveDirectory watches directories only once with chokidar', t => {
+    t.plan(7);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    let delCount = 0;
+
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                if (event === 'change') {
+                    t.equal(event, 'change', 'got correct event');
+                    callback(testFileName);
+                    return;
+                }
+
+                if (event === 'unlink') {
+                    t.equal(event, 'unlink', 'got correct event');
+                    callback(testFileName);
+                    return;
+                }
+
+                t.fail(`Got unexpected event: ${event}`);
+            },
+        };
+    };
+
+    mocks['stream-catcher'] = function() {
+        const expectedDeletes = [
+            testFileName,
+            testFileName,
+            `${testFileName}.gz`,
+        ];
+        let delCount = 0;
+        this.del = fileName => {
+            t.equal(fileName, expectedDeletes[delCount], 'deleted correct fileName');
+            delCount++;
+        };
+        this.write = () => {};
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const fileServer = new MockFileServer(() => {});
+
+    const serveDirectory = fileServer.serveDirectory(testRootDirectory, {
+        '.txt': 'text/plain',
+    });
+
+    serveDirectory(testRequest, testResponse, testFileName);
+    serveDirectory(testRequest, testResponse, testFileName);
 });
