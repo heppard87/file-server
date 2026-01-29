@@ -696,3 +696,45 @@ test('close terminates all file watchers', t => {
     });
 
 });
+
+test('serveDirectory watches directories only once with chokidar', t => {
+    t.plan(6);
+
+    const mocks = getBaseMocks();
+    const expectedOptions = { persistent: true, ignoreInitial: true };
+    let changeCallback;
+
+    mocks.chokidar.watch = (fileName, options) => {
+        t.equal(fileName, testRootDirectory, 'got correct fileName');
+        t.deepEqual(options, expectedOptions, 'got correct options');
+
+        return {
+            on: function(event, callback) {
+                if (event === 'change') {
+                    changeCallback = callback;
+                }
+                t.pass(`subscribed to ${event}`);
+            },
+        };
+    };
+
+    mocks['stream-catcher'] = function() {
+        this.write = () => {};
+        this.del = fileName => t.pass(`deleted correct fileName ${fileName}`);
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+    const fileServer = new MockFileServer(() => {});
+
+    const serveDirectory = fileServer.serveDirectory(
+        testRootDirectory,
+        {
+            '.txt': 'text/majigger',
+        },
+        testMaxAge,
+    );
+
+    serveDirectory(testRequest, testResponse);
+
+    changeCallback(testFileName);
+});
