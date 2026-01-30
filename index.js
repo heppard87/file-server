@@ -8,6 +8,44 @@ const chokidar = require('chokidar');
 const watchers = {};
 const cacheMaxSize = 1024 * 1000;
 
+// BOLT OPTIMIZATION: Shared watcher management to reduce OS resource usage.
+// Instead of one watcher per file, we share watchers and use directory-level watching.
+function addWatcher(path, fileServer) {
+    if (!watchers[path]) {
+        const watcher = chokidar.watch(path, { persistent: true, ignoreInitial: true });
+        watcher._fileServers = new Set();
+        watchers[path] = watcher;
+    }
+
+    watchers[path]._fileServers.add(fileServer);
+    fileServer.watchers[path] = watchers[path];
+
+    if (!watchers[path]._listenerAttached) {
+        watchers[path]._listenerAttached = true;
+        watchers[path].on('all', (event, filePath) => {
+            if (event === 'change' || event === 'unlink') {
+                watchers[path]._fileServers.forEach(fs => {
+                    fs.cache.del(filePath);
+                    fs.cache.del(filePath + '.gz');
+                });
+            }
+        });
+    }
+}
+
+function removeWatcher(path, fileServer) {
+    const watcher = watchers[path];
+    if (watcher) {
+        watcher._fileServers.delete(fileServer);
+        if (watcher._fileServers.size === 0) {
+            const closePromise = watcher.close();
+            delete watchers[path];
+            return closePromise;
+        }
+    }
+    return Promise.resolve();
+}
+
 function cacheLengthFunction(n) {
     return n.length;
 }
@@ -90,17 +128,11 @@ function getStats(acceptsGzip, fileName, response, done) {
     });
 }
 
-FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
+FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0, _suppressWatcher) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
-        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
-        watcher.on('change', () => {
-            fileServer.cache.del(fileName);
-        });
-        watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
-        this.watchers[fileName] = watcher;
+    if (!_suppressWatcher) {
+        addWatcher(fileName, fileServer);
     }
 
     if (!fileName || typeof fileName !== 'string') {
@@ -155,6 +187,10 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
         }
     }
 
+    // BOLT OPTIMIZATION: Watch the entire root directory once instead of every file.
+    // This prevents resource exhaustion when serving directories with many files.
+    addWatcher(rootDirectory, fileServer);
+
     return function(request, response, fileName) {
         if (arguments.length < 3) {
             fileName = request.url.slice(1);
@@ -172,15 +208,14 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
             return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
         }
 
-        fileServer.serveFile(filePath, mimeTypes[extention], maxAge)(request, response);
+        fileServer.serveFile(filePath, mimeTypes[extention], maxAge, true)(request, response);
     };
 };
 
 FileServer.prototype.close = function(onClose) {
     const closePromises = [];
     Object.keys(this.watchers).forEach((key) => {
-        const watcher = this.watchers[key];
-        closePromises.push(watcher.close());
+        closePromises.push(removeWatcher(key, this));
         delete this.watchers[key];
     });
     
