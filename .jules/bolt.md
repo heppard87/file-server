@@ -1,0 +1,3 @@
+## 2025-05-15 - [Shared Watcher Initialization Order]
+**Learning:** When implementing a shared watcher system, the watcher's state (like the set of interested servers) must be initialized BEFORE attaching event listeners if there's a risk of synchronous callbacks (e.g., from test mocks). In this codebase, attaching the 'all' listener when the first server was added, but after the server was put in the Set, fixed a race condition where the Set was empty when the mock callback fired.
+**Action:** Always ensure the tracking metadata (Sets, Maps, counters) is ready before registering callbacks that depend on that metadata.
