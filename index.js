@@ -5,6 +5,8 @@ const kgo = require('kgo');
 const StreamCatcher = require('stream-catcher');
 const chokidar = require('chokidar');
 
+// Shared watchers keyed by directory path to optimize resource usage.
+// Each entry contains a chokidar watcher and a Set of FileServer instances.
 const watchers = {};
 const cacheMaxSize = 1024 * 1000;
 
@@ -91,20 +93,42 @@ function getStats(acceptsGzip, fileName, response, done) {
 }
 
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
-    const fileServer = this;
-
-    if (!watchers[fileName]) {
-        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
-        watcher.on('change', () => {
-            fileServer.cache.del(fileName);
-        });
-        watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
-        this.watchers[fileName] = watcher;
-    }
-
     if (!fileName || typeof fileName !== 'string') {
         throw new Error('Must provide a fileName to serveFile');
+    }
+
+    const fileServer = this;
+    const absolutePath = path.resolve(fileName);
+    const directory = path.dirname(absolutePath);
+
+    // BOLT OPTIMIZATION: Use a single chokidar watcher per directory shared across all FileServer instances.
+    // This significantly reduces memory usage and the number of open file descriptors.
+    // It also ensures that all instances are notified of file changes/deletions.
+    if (!watchers[directory]) {
+        const watcher = chokidar.watch(directory, { persistent: true, ignoreInitial: true, depth: 0 });
+        watcher._fileServers = new Set();
+        watchers[directory] = watcher;
+    }
+
+    if (!watchers[directory]._fileServers.has(this)) {
+        watchers[directory]._fileServers.add(this);
+        // Track the watcher on the instance for programmatic closing.
+        this.watchers[directory] = watchers[directory];
+
+        // BOLT: Attach the listener after adding the first server to ensure synchronous callbacks from mocks work correctly.
+        if (watchers[directory]._fileServers.size === 1) {
+            watchers[directory].on('all', (event, changedPath) => {
+                const absoluteChangedPath = path.resolve(changedPath);
+                // Invalidate cache for the changed file across all interested FileServer instances.
+                if (watchers[directory]) {
+                    watchers[directory]._fileServers.forEach(server => {
+                        server.cache.del(absoluteChangedPath);
+                        // Also attempt to invalidate the .gz version in case it was the one being served.
+                        server.cache.del(absoluteChangedPath + '.gz');
+                    });
+                }
+            });
+        }
     }
 
     return function(request, response) {
@@ -115,7 +139,7 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
 
         kgo({
             acceptsGzip,
-            fileName,
+            fileName: absolutePath,
             mimeType,
             maxAge,
             request,
@@ -180,12 +204,18 @@ FileServer.prototype.close = function(onClose) {
     const closePromises = [];
     Object.keys(this.watchers).forEach((key) => {
         const watcher = this.watchers[key];
-        closePromises.push(watcher.close());
+        watcher._fileServers.delete(this);
+
+        // Only close the shared watcher if no other FileServer instances are using it.
+        if (watcher._fileServers.size === 0) {
+            closePromises.push(watcher.close());
+            delete watchers[key];
+        }
         delete this.watchers[key];
     });
     
     Promise.all(closePromises).then(() => {
-        onClose();
+        onClose && onClose();
     });
 }
 
