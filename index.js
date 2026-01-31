@@ -40,11 +40,11 @@ function FileServer(errorCallback, cacheSize) {
     this.watchers = {};
 }
 
-FileServer.prototype.getFile = function(stats, fileName, mimeType, maxAge, request, response) {
+FileServer.prototype.getFile = function(stats, fileName, mimeType, maxAge, request, response, originalFileName) {
     const fileServer = this;
 
     if (!stats.isFile()) {
-        return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
+        return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${originalFileName || fileName}` });
     }
 
     const eTag = hashr.hash(fileName + stats.mtime.getTime());
@@ -93,19 +93,35 @@ function getStats(acceptsGzip, fileName, response, done) {
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
     const fileServer = this;
 
-    if (!watchers[fileName]) {
-        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
-        watcher.on('change', () => {
-            fileServer.cache.del(fileName);
-        });
-        watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
-        this.watchers[fileName] = watcher;
-    }
-
     if (!fileName || typeof fileName !== 'string') {
         throw new Error('Must provide a fileName to serveFile');
     }
+
+    const absolutePath = path.resolve(fileName);
+    const dirPath = path.dirname(absolutePath);
+
+    // Performance Optimization: Share chokidar watchers at the directory level (depth: 0).
+    // This avoids creating thousands of watchers for many files in the same directory,
+    // significantly reducing memory and file descriptor overhead.
+    if (!watchers[dirPath]) {
+        const watcher = chokidar.watch(dirPath, { persistent: true, ignoreInitial: true, depth: 0 });
+        const sharedWatcher = {
+            watcher: watcher,
+            _fileServers: new Set([fileServer]),
+        };
+        watchers[dirPath] = sharedWatcher;
+        watcher.on('all', (event, changedPath) => {
+            const absoluteChangedPath = path.resolve(changedPath);
+            sharedWatcher._fileServers.forEach(fs => {
+                fs.cache.del(absoluteChangedPath);
+                fs.cache.del(absoluteChangedPath + '.gz');
+            });
+        });
+    } else {
+        watchers[dirPath]._fileServers.add(fileServer);
+    }
+    // Add to local instance for programmtic closing
+    this.watchers[dirPath] = true;
 
     return function(request, response) {
         const acceptsGzip =
@@ -115,14 +131,15 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
 
         kgo({
             acceptsGzip,
-            fileName,
+            fileName: absolutePath,
+            originalFileName: fileName,
             mimeType,
             maxAge,
             request,
             response,
         })
         ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
-        (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
+        (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response', 'originalFileName'], fileServer.getFile.bind(fileServer))
         (['*'], error => {
             if (error.message && ~error.message.indexOf('ENOENT')) {
                 return fileServer.errorCallback(request, response, {
@@ -178,19 +195,25 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
 
 FileServer.prototype.close = function(onClose) {
     const closePromises = [];
-    Object.keys(this.watchers).forEach((key) => {
-        const watcher = this.watchers[key];
-        closePromises.push(watcher.close());
-        delete this.watchers[key];
+    Object.keys(this.watchers).forEach((dirPath) => {
+        const sharedWatcher = watchers[dirPath];
+        if (sharedWatcher) {
+            sharedWatcher._fileServers.delete(this);
+            if (sharedWatcher._fileServers.size === 0) {
+                closePromises.push(sharedWatcher.watcher.close());
+                delete watchers[dirPath];
+            }
+        }
+        delete this.watchers[dirPath];
     });
-    
+
     Promise.all(closePromises).then(() => {
         onClose();
     });
-}
+};
 
 process.on('exit', () => {
-    Object.values(watchers).forEach(watcher => watcher.close());
+    Object.values(watchers).forEach(sharedWatcher => sharedWatcher.watcher.close());
 });
 
 module.exports = FileServer;
