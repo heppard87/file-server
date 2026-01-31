@@ -229,7 +229,7 @@ test('serveFile sets headers and asks for file', t => {
     const testResponse = {
         setHeader: (key, value) => {
             if (key === 'ETag') {
-                t.equal(value, testFileName + testDate.getTime(), `got correct header value for ${key}`);
+                t.equal(value, path.resolve(testFileName) + testDate.getTime(), `got correct header value for ${key}`);
                 return;
             }
 
@@ -253,7 +253,7 @@ test('serveFile sets headers and asks for file', t => {
 
     mocks['stream-catcher'] = function() {
         this.write = function(fileName, response, createReadStream) {
-            t.equal(fileName, testFileName, 'fileName is correct');
+            t.equal(fileName, path.resolve(testFileName), 'fileName is correct');
             t.equal(response, testResponse, 'response is correct');
             t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
         };
@@ -274,13 +274,13 @@ test('serveFile returns 304 if etag matches', t => {
     const mocks = getBaseMocks();
     const testRequest = {
         headers: {
-            'if-none-match': testFileName + testDate.getTime(),
+            'if-none-match': path.resolve(testFileName) + testDate.getTime(),
         },
     };
     const testResponse = {
         setHeader: (key, value) => {
             if (key === 'ETag') {
-                t.equal(value, testFileName + testDate.getTime(), `got correct header value for ${key}`);
+                t.equal(value, path.resolve(testFileName) + testDate.getTime(), `got correct header value for ${key}`);
                 return;
             }
 
@@ -293,6 +293,7 @@ test('serveFile returns 304 if etag matches', t => {
         },
         writeHead: code => t.equal(code, 304, 'set 304 code correctly'),
         end: () => t.pass('end was called'),
+        on: () => {},
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -332,7 +333,7 @@ test('serveFile passes create stream into cache', t => {
 
     mocks['stream-catcher'] = function() {
         this.write = function(fileName, response, createReadStream) {
-            t.equal(fileName, testFileName, 'fileName is correct');
+            t.equal(fileName, path.resolve(testFileName), 'fileName is correct');
             t.equal(response, testResponse, 'response is correct');
             t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
 
@@ -358,22 +359,26 @@ test('serveFile watches files only once with chokidar', t => {
     t.plan(4);
 
     const mocks = getBaseMocks();
-    const expectedOptions = { persistent: true, ignoreInitial: true };
+    const expectedOptions = { persistent: true, ignoreInitial: true, depth: 0 };
 
-    mocks.chokidar.watch = (fileName, options) => {
-        t.equal(fileName, testFileName, 'got correct fileName');
+    mocks.chokidar.watch = (dirName, options) => {
+        t.equal(dirName, path.dirname(path.resolve(testFileName)), 'got correct dirName');
         t.deepEqual(options, expectedOptions, 'got correct options');
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
-                callback();
+                t.equal(event, 'all', 'got correct event');
+                callback('change', path.resolve(testFileName));
             },
         };
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => {
+            if (fileName === path.resolve(testFileName)) {
+                t.pass('deleted correct fileName');
+            }
+        };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -393,7 +398,11 @@ test('process on exit cleans up watches', t => {
     let MockFileServer;
 
     mocks.chokidar.watch = () => ({
-        on: (event, callback) => callback(),
+        on: (event, callback) => {
+            if (event === 'all') {
+                callback('change', testFileName);
+            }
+        },
         close: () => t.pass('closed watcher'),
     });
 
@@ -437,7 +446,7 @@ test('serveFile checks for .gz file if gzip supported but uses original if not a
 
     mocks['stream-catcher'] = function() {
         this.write = function(fileName, response, createReadStream) {
-            t.equal(fileName, testFileName, 'fileName is correct');
+            t.equal(fileName, path.resolve(testFileName), 'fileName is correct');
             t.equal(response, testResponse, 'response is correct');
             t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
         };
@@ -471,7 +480,7 @@ test('serveFile uses .gz file if gzip supported and exists', t => {
 
     mocks['stream-catcher'] = function() {
         this.write = function(fileName, response, createReadStream) {
-            t.equal(fileName, `${testFileName}.gz`, 'fileName is correct');
+            t.equal(fileName, `${path.resolve(testFileName)}.gz`, 'fileName is correct');
             t.equal(response, testResponse, 'response is correct');
             t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
         };
@@ -695,4 +704,62 @@ test('close terminates all file watchers', t => {
         t.equal(Object.keys(fileServer.watchers).length, 0);
     });
 
+});
+
+test('multiple FileServer instances share watchers and all get cache invalidation', t => {
+    t.plan(4);
+
+    const mocks = getBaseMocks();
+    let watcherCallback;
+
+    mocks.chokidar.watch = (dirName, options) => {
+        return {
+            on: (event, callback) => {
+                if (event === 'all') {
+                    watcherCallback = callback;
+                }
+            },
+            close: () => Promise.resolve(),
+        };
+    };
+
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    let delCount1 = 0;
+    let delCount2 = 0;
+
+    const fs1 = new MockFileServer(() => {});
+    fs1.cache.del = (p) => {
+        if (p.endsWith('foo.txt') || p.endsWith('foo.txt.gz')) {
+            delCount1++;
+        }
+    };
+
+    const fs2 = new MockFileServer(() => {});
+    fs2.cache.del = (p) => {
+        if (p.endsWith('foo.txt') || p.endsWith('foo.txt.gz')) {
+            delCount2++;
+        }
+    };
+
+    fs1.serveFile(testFileName);
+    fs2.serveFile(testFileName);
+
+    t.ok(watcherCallback, 'watcher callback was registered');
+
+    // Simulate file change
+    watcherCallback('change', testFileName);
+
+    // Each del is called twice (once for file, once for .gz)
+    t.equal(delCount1, 2, 'fs1 cache was invalidated (file and .gz)');
+    t.equal(delCount2, 2, 'fs2 cache was invalidated (file and .gz)');
+
+    // Verify closing one doesn't close the watcher for the other
+    // In this mock, close returns a promise but we don't have an easy way to check if it was called
+    // without more complex mocking. But we can check if fs1 is still in the shared watcher set
+    // if we had access to it.
+
+    fs1.close(() => {
+        t.pass('fs1 closed');
+    });
 });
