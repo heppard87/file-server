@@ -6,6 +6,8 @@ const pathToObjectUnderTest = '../';
 const FileServer = require(pathToObjectUnderTest);
 const testDate = new Date();
 const testFileName = './foo.txt';
+const testAbsoluteFileName = path.resolve(testFileName);
+const testAbsoluteDirName = path.dirname(testAbsoluteFileName);
 const testMimeType = 'bar';
 const testMaxAge = 123;
 const testKey = 'bar';
@@ -50,6 +52,7 @@ function getBaseMocks() {
         'stream-catcher': function() {
             this.read = () => {};
             this.write = () => {};
+            this.del = () => {};
         },
         chokidar: {
             watch: function() {
@@ -85,7 +88,9 @@ test('FileServer constructs a cache', t => {
         length: 'foo',
     };
 
-    const testCache = {};
+    const testCache = {
+        del: () => {}
+    };
 
     const mocks = getBaseMocks();
 
@@ -111,6 +116,7 @@ test('FileServer constructs a cache with custom size', t => {
 
     mocks['stream-catcher'] = function(options) {
         t.equal(options.max, expectedMax, 'cache max set correctly');
+        return { del: () => {} };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -229,7 +235,7 @@ test('serveFile sets headers and asks for file', t => {
     const testResponse = {
         setHeader: (key, value) => {
             if (key === 'ETag') {
-                t.equal(value, testFileName + testDate.getTime(), `got correct header value for ${key}`);
+                t.equal(value, testAbsoluteFileName + testDate.getTime(), `got correct header value for ${key}`);
                 return;
             }
 
@@ -253,10 +259,11 @@ test('serveFile sets headers and asks for file', t => {
 
     mocks['stream-catcher'] = function() {
         this.write = function(fileName, response, createReadStream) {
-            t.equal(fileName, testFileName, 'fileName is correct');
+            t.equal(fileName, testAbsoluteFileName, 'fileName is correct');
             t.equal(response, testResponse, 'response is correct');
             t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
         };
+        this.del = () => {};
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -274,13 +281,13 @@ test('serveFile returns 304 if etag matches', t => {
     const mocks = getBaseMocks();
     const testRequest = {
         headers: {
-            'if-none-match': testFileName + testDate.getTime(),
+            'if-none-match': testAbsoluteFileName + testDate.getTime(),
         },
     };
     const testResponse = {
         setHeader: (key, value) => {
             if (key === 'ETag') {
-                t.equal(value, testFileName + testDate.getTime(), `got correct header value for ${key}`);
+                t.equal(value, testAbsoluteFileName + testDate.getTime(), `got correct header value for ${key}`);
                 return;
             }
 
@@ -332,7 +339,7 @@ test('serveFile passes create stream into cache', t => {
 
     mocks['stream-catcher'] = function() {
         this.write = function(fileName, response, createReadStream) {
-            t.equal(fileName, testFileName, 'fileName is correct');
+            t.equal(fileName, testAbsoluteFileName, 'fileName is correct');
             t.equal(response, testResponse, 'response is correct');
             t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
 
@@ -343,6 +350,7 @@ test('serveFile passes create stream into cache', t => {
             t.equal(key, testKey, 'key is correct');
             t.equal(readStream, testReadStream, 'readStream is correct');
         };
+        this.del = () => {};
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -358,22 +366,26 @@ test('serveFile watches files only once with chokidar', t => {
     t.plan(4);
 
     const mocks = getBaseMocks();
-    const expectedOptions = { persistent: true, ignoreInitial: true };
+    const expectedOptions = { persistent: true, ignoreInitial: true, depth: 0 };
 
-    mocks.chokidar.watch = (fileName, options) => {
-        t.equal(fileName, testFileName, 'got correct fileName');
+    mocks.chokidar.watch = (dirName, options) => {
+        t.equal(dirName, testAbsoluteDirName, 'got correct dirName');
         t.deepEqual(options, expectedOptions, 'got correct options');
 
         return {
             on: function(event, callback) {
-                t.equal(event, 'change', 'got correct event');
-                callback();
+                t.equal(event, 'all', 'got correct event');
+                callback('change', testAbsoluteFileName);
             },
         };
     };
 
     mocks['stream-catcher'] = function() {
-        this.del = fileName => t.equal(fileName, testFileName, 'deleted correct fileName');
+        this.del = fileName => {
+            if (fileName === testAbsoluteFileName) {
+                t.pass('deleted correct fileName');
+            }
+        };
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -393,7 +405,7 @@ test('process on exit cleans up watches', t => {
     let MockFileServer;
 
     mocks.chokidar.watch = () => ({
-        on: (event, callback) => callback(),
+        on: (event, callback) => callback('change', testAbsoluteFileName),
         close: () => t.pass('closed watcher'),
     });
 
@@ -437,10 +449,11 @@ test('serveFile checks for .gz file if gzip supported but uses original if not a
 
     mocks['stream-catcher'] = function() {
         this.write = function(fileName, response, createReadStream) {
-            t.equal(fileName, testFileName, 'fileName is correct');
+            t.equal(fileName, testAbsoluteFileName, 'fileName is correct');
             t.equal(response, testResponse, 'response is correct');
             t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
         };
+        this.del = () => {};
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -471,10 +484,11 @@ test('serveFile uses .gz file if gzip supported and exists', t => {
 
     mocks['stream-catcher'] = function() {
         this.write = function(fileName, response, createReadStream) {
-            t.equal(fileName, `${testFileName}.gz`, 'fileName is correct');
+            t.equal(fileName, `${testAbsoluteFileName}.gz`, 'fileName is correct');
             t.equal(response, testResponse, 'response is correct');
             t.equal(typeof createReadStream, 'function', 'createReadStream is a function');
         };
+        this.del = () => {};
     };
 
     const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
@@ -665,7 +679,7 @@ test('close terminates all file watchers', t => {
             on: () => {},
             close: () => {
                 closedConnections++;
-                Promise.resolve();
+                return Promise.resolve();
             },
         };
     };
@@ -688,6 +702,11 @@ test('close terminates all file watchers', t => {
     serveDirectory(testRequest, testResponse);
     serveFile(testRequest, testResponse);
 
+    // Both files are in the same directory in this test setup because testRootDirectory is './files'
+    // and testFileName is './foo.txt'.
+    // Wait, testRootDirectory + request.url = './files/bar/foo.txt'.
+    // testFileName = './foo.txt'.
+    // They are in different directories: './files/bar' and '.'.
     t.equal(Object.keys(fileServer.watchers).length, 2);
 
     fileServer.close(() => {
@@ -695,4 +714,36 @@ test('close terminates all file watchers', t => {
         t.equal(Object.keys(fileServer.watchers).length, 0);
     });
 
+});
+
+test('multiple FileServer instances share watchers', t => {
+    t.plan(4);
+
+    let watcherCount = 0;
+    const mocks = getBaseMocks();
+    mocks.chokidar.watch = () => {
+        watcherCount++;
+        return {
+            on: () => {},
+            close: () => {
+                watcherCount--;
+                return Promise.resolve();
+            }
+        };
+    };
+    const MockFileServer = proxyquire(pathToObjectUnderTest, mocks);
+
+    const server1 = new MockFileServer(() => {});
+    const server2 = new MockFileServer(() => {});
+
+    server1.serveFile(testFileName);
+    server2.serveFile(testFileName);
+
+    t.equal(watcherCount, 1, 'only one watcher created for same directory');
+    t.equal(Object.keys(server1.watchers).length, 1);
+    t.equal(Object.keys(server2.watchers).length, 1);
+
+    server1.close(() => {
+        t.equal(watcherCount, 1, 'watcher still active because server2 is using it');
+    });
 });

@@ -40,14 +40,14 @@ function FileServer(errorCallback, cacheSize) {
     this.watchers = {};
 }
 
-FileServer.prototype.getFile = function(stats, fileName, mimeType, maxAge, request, response) {
+FileServer.prototype.getFile = function(stats, finalPath, mimeType, maxAge, request, response, originalFileName) {
     const fileServer = this;
 
     if (!stats.isFile()) {
-        return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${fileName}` });
+        return fileServer.errorCallback(request, response, { code: 404, message: `404: Not Found ${originalFileName}` });
     }
 
-    const eTag = hashr.hash(fileName + stats.mtime.getTime());
+    const eTag = hashr.hash(finalPath + stats.mtime.getTime());
 
     response.setHeader('ETag', eTag);
     response.setHeader('Cache-Control', `private, max-age=${maxAge}`);
@@ -65,17 +65,17 @@ FileServer.prototype.getFile = function(stats, fileName, mimeType, maxAge, reque
         return response.end();
     }
 
-    fileServer.cache.write(fileName, response, createReadStream(fileServer, request, response));
+    fileServer.cache.write(finalPath, response, createReadStream(fileServer, request, response));
 };
 
-function getStats(acceptsGzip, fileName, response, done) {
-    const gzipFileName = `${fileName}.gz`;
+function getStats(acceptsGzip, absolutePath, response, done) {
+    const gzipFileName = `${absolutePath}.gz`;
 
     if (acceptsGzip) {
         fs.stat(gzipFileName, (error, stats) => {
             if (error) {
-                return fs.stat(fileName, (error, stats) => {
-                    done.call(null, error, stats, fileName);
+                return fs.stat(absolutePath, (error, stats) => {
+                    done.call(null, error, stats, absolutePath);
                 });
             }
 
@@ -85,26 +85,46 @@ function getStats(acceptsGzip, fileName, response, done) {
         return;
     }
 
-    fs.stat(fileName, (error, stats) => {
-        done.call(null, error, stats, fileName);
+    fs.stat(absolutePath, (error, stats) => {
+        done.call(null, error, stats, absolutePath);
     });
 }
 
 FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', maxAge = 0) {
-    const fileServer = this;
-
-    if (!watchers[fileName]) {
-        const watcher = chokidar.watch(fileName, { persistent: true, ignoreInitial: true });
-        watcher.on('change', () => {
-            fileServer.cache.del(fileName);
-        });
-        watchers[fileName] = watcher;
-        // Add to local instance for programmtic closing
-        this.watchers[fileName] = watcher;
-    }
-
     if (!fileName || typeof fileName !== 'string') {
         throw new Error('Must provide a fileName to serveFile');
+    }
+
+    const fileServer = this;
+    const absolutePath = path.resolve(fileName);
+    const dirPath = path.dirname(absolutePath);
+
+    /**
+     * BOLT OPTIMIZATION:
+     * Use shared directory-level watchers instead of individual file watchers.
+     * This significantly reduces the number of file descriptors and memory usage
+     * when serving many files from the same directory.
+     */
+    if (!watchers[dirPath]) {
+        const watcher = chokidar.watch(dirPath, { persistent: true, ignoreInitial: true, depth: 0 });
+        watcher._fileServers = new Set();
+        watchers[dirPath] = watcher;
+    }
+
+    if (!this.watchers[dirPath]) {
+        watchers[dirPath]._fileServers.add(this);
+        this.watchers[dirPath] = true;
+    }
+
+    if (!watchers[dirPath]._listenerAttached) {
+        watchers[dirPath].on('all', (event, filePath) => {
+            const absoluteFilePath = path.resolve(filePath);
+            watchers[dirPath]._fileServers.forEach(server => {
+                server.cache.del(absoluteFilePath);
+                server.cache.del(absoluteFilePath + '.gz');
+            });
+        });
+        watchers[dirPath]._listenerAttached = true;
     }
 
     return function(request, response) {
@@ -116,13 +136,14 @@ FileServer.prototype.serveFile = function(fileName, mimeType = 'text/plain', max
         kgo({
             acceptsGzip,
             fileName,
+            absolutePath,
             mimeType,
             maxAge,
             request,
             response,
         })
-        ('stats', 'finalFilename', ['acceptsGzip', 'fileName', 'response'], getStats)
-        (['stats', 'finalFilename', 'mimeType', 'maxAge', 'request', 'response'], fileServer.getFile.bind(fileServer))
+        ('stats', 'finalPath', ['acceptsGzip', 'absolutePath', 'response'], getStats)
+        (['stats', 'finalPath', 'mimeType', 'maxAge', 'request', 'response', 'fileName'], fileServer.getFile.bind(fileServer))
         (['*'], error => {
             if (error.message && ~error.message.indexOf('ENOENT')) {
                 return fileServer.errorCallback(request, response, {
@@ -178,14 +199,20 @@ FileServer.prototype.serveDirectory = function(rootDirectory, mimeTypes, maxAge 
 
 FileServer.prototype.close = function(onClose) {
     const closePromises = [];
-    Object.keys(this.watchers).forEach((key) => {
-        const watcher = this.watchers[key];
-        closePromises.push(watcher.close());
-        delete this.watchers[key];
+    Object.keys(this.watchers).forEach((dirPath) => {
+        const sharedWatcher = watchers[dirPath];
+        if (sharedWatcher) {
+            sharedWatcher._fileServers.delete(this);
+            if (sharedWatcher._fileServers.size === 0) {
+                closePromises.push(sharedWatcher.close());
+                delete watchers[dirPath];
+            }
+        }
+        delete this.watchers[dirPath];
     });
     
     Promise.all(closePromises).then(() => {
-        onClose();
+        onClose && onClose();
     });
 }
 
