@@ -1,0 +1,3 @@
+## 2025-05-23 - [Shared Directory-Level File Watching]
+**Learning:** Watching individual files can lead to an explosion of file descriptors and memory usage when serving many files from the same directory. Chokidar is much more efficient when watching a directory at once.
+**Action:** Always prefer directory-level watching with `depth: 0` (or appropriate depth) when multiple files in the same directory need to be monitored. Implement reference counting to share these watchers across different instances of a service. Use absolute paths to ensure consistency between watcher events and internal cache keys.
