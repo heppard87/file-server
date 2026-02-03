@@ -1,0 +1,3 @@
+## 2025-05-15 - [Consolidate file watchers to directory level]
+**Learning:** Consolidating watchers from per-file to per-directory (depth: 0) drastically reduces resource overhead (file descriptors and memory) especially when serving large directories. For 1000 files, this reduces watchers from 1000 to 1 (or number of unique directories).
+**Action:** When using file-watching libraries like Chokidar in a server context, always prefer watching at the directory level if multiple files in the same directory are expected to be watched. Use absolute paths for consistent cache keys and watcher grouping. Ensure shared watchers are reference-counted for proper cleanup.
