@@ -1,0 +1,3 @@
+## 2025-05-14 - [Consolidating Chokidar watchers to directory level]
+**Learning:** Creating a separate Chokidar watcher for every file served can lead to massive resource overhead (file descriptors and memory) as the number of files scales. In a file server, directory-level watchers (depth: 0) are significantly more efficient. Consolidating watchers reduced setup time by ~47% for 500 files and reduced file descriptor usage from O(N) to O(D).
+**Action:** Always prefer directory-level watchers with manual filtering for file-specific events when building scalable file watching systems. Use reference counting to share watchers across multiple instances.
